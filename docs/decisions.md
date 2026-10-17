@@ -1,8 +1,8 @@
 # Decisions
 
-Architecture decision records, in the order the system was built. Each entry gives the context, what I decided and what that costs. "Evidence" points at code or tests in this repository. Where a decision is a design that is not built yet, the entry says so.
+Architecture decision records, in the order the system was built. Each entry gives the context, what I decided and what that costs. "Evidence" points at code or tests in this repository. 
 
-Index: [001 chain](#adr-001-ethereum-l1-not-an-l2) · [002 build vs buy](#adr-002-write-the-indexer-instead-of-using-ponder-or-the-graph) · [003 language](#adr-003-typescript-everywhere) · [004 storage](#adr-004-postgres-as-the-source-of-truth-two-schemas) · [005 commit unit](#adr-005-one-transaction-per-block-range-the-range-row-is-the-checkpoint) · [006 finality](#adr-006-the-finalized-tag-defines-the-reorg-window) · [007 reorg signal](#adr-007-parent-hash-continuity-is-the-reorg-signal) · [008 rollback](#adr-008-roll-back-whole-ranges) · [009 halt](#adr-009-halt-on-a-fork-at-or-below-the-finalized-block) · [010 landing table](#adr-010-keep-raw-logs-in-a-landing-table-decode-into-separate-tables) · [011 publish](#adr-011-fail-closed-publish-after-seven-sql-gates) · [012 backfill ids](#adr-012-deterministic-backfill-job-ids) · [013 reconciliation](#adr-013-second-source-reconciliation) · [014 rebuild](#adr-014-rebuild-verification) · [015 Parquet](#adr-015-parquet-and-duckdb-for-scan-heavy-aggregates-with-deterministic-output) · [016 API](#adr-016-read-only-api-with-fail-closed-queries-and-keyset-pagination) · [017 RPC pool](#adr-017-classify-rpc-errors-and-let-the-pool-decide) · [018 lock](#adr-018-one-indexer-per-chain-via-an-advisory-lock) · [019 observability](#adr-019-operational-state-lives-in-postgres-alerts-are-log-only-until-configured) · [020 retention](#adr-020-retention-by-reacquirability-design-not-shipped) · [021 tests](#adr-021-test-the-failure-paths-with-a-mock-rpc-and-a-real-node) · [022 abort handling](#adr-022-per-call-abort-promises)
+Index: [001 chain](#adr-001-ethereum-l1-not-an-l2) · [002 build vs buy](#adr-002-write-the-indexer-instead-of-using-ponder-or-the-graph) · [003 language](#adr-003-typescript-everywhere) · [004 storage](#adr-004-postgres-as-the-source-of-truth-two-schemas) · [005 commit unit](#adr-005-one-transaction-per-block-range-the-range-row-is-the-checkpoint) · [006 finality](#adr-006-the-finalized-tag-defines-the-reorg-window) · [007 reorg signal](#adr-007-parent-hash-continuity-is-the-reorg-signal) · [008 rollback](#adr-008-roll-back-whole-ranges) · [009 halt](#adr-009-halt-on-a-fork-at-or-below-the-finalized-block) · [010 landing table](#adr-010-keep-raw-logs-in-a-landing-table-decode-into-separate-tables) · [011 publish](#adr-011-fail-closed-publish-after-seven-sql-gates) · [012 backfill ids](#adr-012-deterministic-backfill-job-ids) · [013 reconciliation](#adr-013-second-source-reconciliation) · [014 rebuild](#adr-014-rebuild-verification) · [015 Parquet](#adr-015-parquet-and-duckdb-for-scan-heavy-aggregates-with-deterministic-output) · [016 API](#adr-016-read-only-api-with-fail-closed-queries-and-keyset-pagination) · [017 RPC pool](#adr-017-classify-rpc-errors-and-let-the-pool-decide) · [018 lock](#adr-018-one-indexer-per-chain-via-an-advisory-lock) · [019 observability](#adr-019-operational-state-lives-in-postgres-alerts-are-log-only-until-configured) · [020 retention](#adr-020-retention-by-reacquirability) · [021 tests](#adr-021-test-the-failure-paths-with-a-mock-rpc-and-a-real-node) · [022 abort handling](#adr-022-per-call-abort-promises) · [023 sticky halt](#adr-023-a-halt-is-sticky-until-acknowledged)
 
 ## ADR-001: Ethereum L1, not an L2
 
@@ -34,7 +34,7 @@ Index: [001 chain](#adr-001-ethereum-l1-not-an-l2) · [002 build vs buy](#adr-00
 
 **Decision.** Postgres 17. Schema `chain` holds indexed data (`blocks`, landing `logs`, `erc20_transfers`, `uniswap_v3_swaps`); schema `ops` holds evidence about how it got there (`runs`, `ranges`, `reorgs`, `quality_results`, `backfill_jobs`, `reconciliations`, `lag_samples`). Hashes and addresses are lowercase `0x` hex text; amounts are `NUMERIC(78,0)`, which holds uint256 and int256. Constraints carry invariants where cheap: status and action checks, a shape check on `ops.reorgs` that makes `rolled_back` rows carry an ancestor and `halted` rows carry none ([schema.ts](../packages/db/src/schema.ts)).
 
-**Consequences.** Everything is one transaction boundary. Storage is large, about 86 KB per block live, because decoded rows duplicate raw logs (ADR-010, ADR-020). Primary keys are `(chain_id, block_hash, log_index)` for logs, so a reorged block's rows cannot collide with the canonical ones.
+**Consequences.** Everything is one transaction boundary. Storage is large, about 86 KB per block live, because decoded rows duplicate raw logs (ADR-010); retention bounds it (ADR-020). Primary keys are `(chain_id, block_hash, log_index)` for logs, so a reorged block's rows cannot collide with the canonical ones.
 
 ## ADR-005: One transaction per block range; the range row is the checkpoint
 
@@ -72,7 +72,7 @@ Index: [001 chain](#adr-001-ethereum-l1-not-an-l2) · [002 build vs buy](#adr-00
 
 **Context.** Finalized blocks reverting means either a provider is wrong or the chain failed in a way no indexer should guess about.
 
-**Decision.** The ancestor search never looks below `max(finalized, lowest stored block)`. If no common ancestor exists at or above that floor, the indexer writes a `halted` row to `ops.reorgs`, deletes nothing, throws `ReorgBelowFinalizedError`, and exits with code 2. A halt alert is sent before the process ends. The supervisor must not restart it blindly ([operations.md](operations.md), [runbook.md](runbook.md)).
+**Decision.** The ancestor search never looks below `max(finalized, lowest stored block)`. If no common ancestor exists at or above that floor, the indexer writes a `halted` row to `ops.reorgs`, deletes nothing, throws `ReorgBelowFinalizedError`, and exits with code 2. A halt alert is sent before the process ends. The halt then stays in force until a human acknowledges it (ADR-023); [operations.md](operations.md), [runbook.md](runbook.md).
 
 **Consequences.** Availability is deliberately sacrificed for correctness; data stays exactly as it was for inspection. A faulty provider that reports a bogus fork would stop the indexer, which is annoying but recoverable and visible. Tests: Anvil `halts with exit code 2 on a depth-N reorg` at the window size and window + 10 ([reorg.anvil.test.ts](../apps/indexer/test/anvil/reorg.anvil.test.ts)); "fork below finalized" cases in [reorg.int.test.ts](../apps/indexer/test/reorg.int.test.ts).
 
@@ -156,21 +156,28 @@ Index: [001 chain](#adr-001-ethereum-l1-not-an-l2) · [002 build vs buy](#adr-00
 
 **Consequences.** Percentiles are exact for the window and cost one small table. Without Telegram configured, nobody is paged; that is a deployment choice stated plainly in the runbook.
 
-## ADR-020: Retention by reacquirability (design, not shipped)
+## ADR-020: Retention by reacquirability
 
-**Context.** Storage grows by about 86 KB per block live and is dominated by data that is either refetchable or derivable.
+**Context.** Storage grew by about 86 KB per block live (about 700 MiB a day) and is dominated by data that is either refetchable or derivable.
 
-**Decision (design).** Classify data by how it can be recovered, and let that decide what may be pruned:
+**Decision.** Classify data by how it can be recovered, and let that decide what may be deleted ([retention.ts](../apps/indexer/src/retention.ts)):
 
-| Class | Tables | Recoverable from |
-|---|---|---|
-| Landing logs | `chain.logs` | Refetch from providers by block range |
-| Decoded rows | `erc20_transfers`, `uniswap_v3_swaps` | Rebuilt from landing logs, or refetched |
-| Irreplaceable | `chain.blocks`, all `ops.*` tables | Nothing: headers anchor continuity and the ops tables are the evidence trail |
+| Class | Tables | Recoverable from | Policy |
+|---|---|---|---|
+| Landing logs | `chain.logs` | Refetch from providers by block range | Purged per range after `LANDING_RETENTION_DAYS` (default 7) |
+| Decoded rows | `erc20_transfers`, `uniswap_v3_swaps` | Rebuilt from landing logs while they exist, refetched afterwards | Purged per range after `DECODED_RETENTION_DAYS` (unset: kept forever) |
+| Irreplaceable | `chain.blocks`, all `ops.*` tables | Nothing: headers anchor continuity and the ops tables are the evidence trail | Never deleted |
 
-Blocks and ops tables are never pruned. Landing logs may be dropped for old, published, reconciled ranges; decoded rows may be dropped only where Parquet or a refetch can restore them.
+A timer walks ranges oldest first, one transaction per range, and records the step on the range row (`landing_purged_at`, `decoded_purged_at`, migration `0003_ops_range_retention`). Counts stay, so a purged range still describes itself. A check constraint says a purge needs a published range and that decoded is never purged before landing.
 
-**Consequences.** This is being built in parallel and is not part of what is verified here. Until it ships, nothing is pruned except `ops.lag_samples`. The risk to design for is dropping logs that `rebuild-verify` and the `decoded_matches_landing` gate need; those checks must be scoped to retained windows. See [runbook.md](runbook.md#retention).
+Blockers, checked in SQL and again under the range's row lock inside the purge transaction (so a backfill racing the cycle wins):
+
+- **Landing purge:** the range is `published`; its last block is older than the limit; and, once the reconciler has written any row for the chain, the range has a `match` reconciliation row. A mismatch or a missing row keeps the logs, because they are the evidence.
+- **Decoded purge:** landing is already purged; the range is older than the decoded limit; the Parquet manifest (`ANALYTICS_MANIFEST_PATH`) lists the range as exported; and no unexported range exists earlier in the same UTC day. The exporter rewrites a whole day from Postgres, so purging part of a day that still has an unexported range could make the next rewrite lose rows. The process refuses to start with `DECODED_RETENTION_DAYS` set and no manifest path.
+
+Consumers were changed to match: `verify` skips only the parts that were purged, `rebuild-verify` covers ranges whose logs are present and reports `skippedRanges`, the reconciler skips landing-purged ranges instead of recording a false mismatch, and `analytics verify` compares Postgres with Parquet only for days fully retained in Postgres and lists the rest as `purgedDays`. The exporter throws before writing anything if an export would rewrite a day that contains a decoded-purged range.
+
+**Consequences.** Steady-state size is bounded (see [costs-and-load.md](costs-and-load.md#storage)). The real cost: after a decoded purge the Parquet store is the only copy of those days, and `/v1/transfers` and `/v1/swaps` return nothing for them (use the analytics endpoints). It must be backed up and never deleted. `rebuild-verify` and the `decoded_matches_landing` gate cannot cover purged windows. Deleted rows free space inside the tables, they do not shrink the files. Tests: [retention.int.test.ts](../apps/indexer/test/retention.int.test.ts) (reconciliation blockers, range-lock re-check, UTC-day barrier, dry run equals the cycle, consumers of purged ranges), [m3-e2e.int.test.ts](../apps/indexer/test/m3-e2e.int.test.ts) (timer purges, `verify` and `rebuild-verify` stay green), [analytics.int.test.ts](../packages/analytics/test/analytics.int.test.ts) (exporter refusal, `analytics verify` after purges).
 
 ## ADR-021: Test the failure paths with a mock RPC and a real node
 
@@ -187,3 +194,11 @@ Blocks and ops tables are never pruned. Landing logs may be dropped for old, pub
 **Decision.** `untilAborted` creates a fresh abort promise per call and removes its listener when the awaited promise settles ([pipeline.ts](../apps/indexer/src/pipeline.ts)). A GC-based regression test checks that settled values are not kept reachable through a long-lived signal ([until-aborted.test.ts](../apps/indexer/test/until-aborted.test.ts)).
 
 **Consequences.** Memory is flat over a long run. The lesson I took from it: the fault was invisible to every functional test, and only a run longer than a minute found it, which is why the gate is a real 50,000-block run and not a unit suite.
+
+## ADR-023: A halt is sticky until acknowledged
+
+**Context.** Exit code 2 was meant to tell the supervisor not to restart blindly. Docker's `restart: on-failure` cannot exclude one exit code, so in the Docker deployment a halt became a restart loop, each restart querying the provider and halting again.
+
+**Decision.** The halt is recorded in the database and enforced there. On startup, right after taking the chain lock and before any RPC call, `run` looks for a `halted` row in `ops.reorgs` without `acknowledged_at`. If one exists it logs fatal (`halted: unacknowledged reorg #<id>`), sends a `halt-unacknowledged` alert, records a failed run with that reason, and exits 2. `ack-halt <reorgId> <text>` sets `acknowledged_at` and the text, which must not be empty and which only unacknowledged `halted` rows accept. A check constraint ties acknowledgement to halted rows with non-empty text. Migration `0004_ops_reorg_ack` marks halts that existed before it as acknowledged (`predates sticky halts`) so the upgrade cannot block a running indexer. If the provider still serves the fork after acknowledgement, the run halts again as a new row and blocks again.
+
+**Consequences.** A restart loop costs one database round trip per attempt and calls no provider. Resuming needs a person to look and write down what they found, which also leaves that text in the audit table. The cost is that a halt cannot clear itself, even when it was a transient provider fault; that is intended. Tests: [reorg.int.test.ts](../apps/indexer/test/reorg.int.test.ts), describe "a halt stays in force until it is acknowledged" ("makes a restart exit 2 without a single RPC call, recording one failed run and alerting", "lets the run proceed after ack-halt and halts again, as a new unacknowledged row, when the fork is still there", "resumes ingesting after the acknowledgement once the provider serves the stored chain again", "ack-halt refuses bad usage, unknown ids and halts that are already acknowledged").

@@ -67,14 +67,32 @@ M1 gate after the 50,000-block backfill (`pg_database_size` = 5,130,835,635 byte
 
 That is about 102 KB per block (5,130,835,635 / 50,000), 99% of it in the landing logs and the decoded transfers, which duplicate each other by design ([decisions.md](decisions.md#adr-010-keep-raw-logs-in-a-landing-table-decode-into-separate-tables)). The live indexer measures about 86 KB per block. I have not broken down the difference between the two figures, so I use both as a range.
 
-Projection at 7,200 blocks per day (decimal units, rounded):
+Projection at 7,200 blocks per day with **no retention** (decimal units, rounded):
 
 | Per-block size | Per day | Per 30 days | Per year |
 |---|---|---|---|
 | 86 KB (live) | 0.62 GB | 18.6 GB | 226 GB |
 | 102 KB (M1 backfill) | 0.73 GB | 22.0 GB | 268 GB |
 
-The Parquet copy is additional; its size is not part of the figures above. Retention by reacquirability is designed to bound this and is not shipped ([runbook.md](runbook.md#retention)). Until it is, the table above is the growth rate with nothing pruned except `ops.lag_samples` (14 days).
+### With retention
+
+Retention ([decisions.md](decisions.md#adr-020-retention-by-reacquirability), [runbook.md](runbook.md#retention)) deletes landing logs after `LANDING_RETENTION_DAYS` and decoded rows after `DECODED_RETENTION_DAYS`; blocks and `ops.*` stay. The live deployment uses 7 and 14 days. The steady state below is computed, not yet observed over a full window, and uses the M1 gate per-table sizes (indexes included) as the basis, as worked out in [operations.md](operations.md#sizing):
+
+| Table group | Per block | Per day (7,200 blocks) | Kept for | Steady state |
+|---|---|---|---|---|
+| `chain.logs` | 58.9 KiB | 414 MiB | 7 days | 2.8 GiB |
+| `chain.erc20_transfers` + `chain.uniswap_v3_swaps` | 40.8 KiB | 287 MiB | 14 days | 3.9 GiB |
+| `chain.blocks` | 0.35 KiB | 2.5 MiB | forever | grows 2.5 MiB/day (0.9 GiB/year) |
+| Total | | 703 MiB/day without retention | | **6.8 GiB**, then about 2.5 MiB/day, plus the small `ops.*` rows (not measured) |
+
+Two bases, because the figures disagree (above):
+
+- **M1 gate basis (102 KB per block):** 6.8 GiB, as in the table.
+- **Live basis (86 KB per block):** the same table scaled by 86/102, about 5.7 GiB (6.1 GB). This assumes the live rows have the same logs-to-decoded split as the backfill, which I have not checked.
+
+Add roughly one retention interval of data (about 29 MiB per hour at the M1 basis) because purges run hourly, and the Parquet store, which is outside Postgres and whose size I have not measured. Deleted rows are reused inside the tables but do not shrink the files, so the size settles at the peak of the retained window. With retention off the first table applies unchanged. After decoded rows are purged the Parquet store is the only copy of those days, so it counts as data to keep and back up, not as a cache.
+
+The 72 h gate window is too short to show the 7 and 14 day steady state, so the retained-window size stays a computation until the deployment has run for 14 days.
 
 ## API latency
 
