@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  boolean,
   check,
   index,
   integer,
@@ -119,8 +120,9 @@ export const runs = ops.table(
  * Block ranges are the unit of commit. A range row is written in the same
  * transaction as its data, so the set of rows is also the resume checkpoint.
  * `payload_sha256` hashes the canonicalised headers + logs as fetched.
- * Status starts at `candidate`; data-quality gates promote ranges to
- * `published` (milestone M3).
+ * Status starts at `candidate`. A range is `published` only once every block in
+ * it is finalized AND every data-quality gate passed (fail-closed publish);
+ * a failing gate sets `failed` and enqueues one deterministic backfill job.
  */
 export const ranges = ops.table(
   "ranges",
@@ -139,6 +141,7 @@ export const ranges = ops.table(
       .notNull()
       .references(() => runs.id),
     committedAt: timestamp("committed_at", { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.chainId, t.fromBlock] }),
@@ -188,4 +191,94 @@ export const reorgs = ops.table(
       sql`(${t.action} = 'rolled_back' and ${t.ancestorBlock} is not null and ${t.rollbackFrom} is not null) or (${t.action} = 'halted' and ${t.ancestorBlock} is null and ${t.rollbackFrom} is null)`,
     ),
   ],
+);
+
+/** Latest result of each data-quality gate for each range (one row per range and gate). */
+export const qualityResults = ops.table(
+  "quality_results",
+  {
+    chainId: integer("chain_id").notNull(),
+    fromBlock: blockNumber("from_block").notNull(),
+    gate: text("gate").notNull(),
+    passed: boolean("passed").notNull(),
+    rowsChecked: integer("rows_checked").notNull(),
+    rowsFailed: integer("rows_failed").notNull(),
+    detail: text("detail"),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.chainId, t.fromBlock, t.gate] })],
+);
+
+/**
+ * Work queue for ranges that failed a gate. The id is derived from the range
+ * (`<chain>:<from>-<to>`), so repeated failures update one job instead of
+ * creating duplicates.
+ */
+export const backfillJobs = ops.table(
+  "backfill_jobs",
+  {
+    id: text("id").primaryKey(),
+    chainId: integer("chain_id").notNull(),
+    fromBlock: blockNumber("from_block").notNull(),
+    toBlock: blockNumber("to_block").notNull(),
+    status: text("status").notNull(),
+    failureReason: text("failure_reason").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("backfill_jobs_range_key").on(t.chainId, t.fromBlock, t.toBlock),
+    index("backfill_jobs_open_idx").on(t.chainId, t.status, t.createdAt),
+    check("backfill_jobs_status_check", sql`${t.status} in ('queued', 'running', 'resolved')`),
+    check("backfill_jobs_attempts_check", sql`${t.attempts} >= 0`),
+  ],
+);
+
+/** A height whose stored hash disagrees with the second source. */
+export interface ReconciliationMismatch {
+  number: number;
+  stored: string;
+  observed: string | null;
+}
+
+/**
+ * Second-source checks of finalized ranges: block hashes and per-range log
+ * counts re-read from a provider other than the one that served the range.
+ * Every `mismatch` needs an `explanation` before the M3 gate can pass.
+ */
+export const reconciliations = ops.table(
+  "reconciliations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    chainId: integer("chain_id").notNull(),
+    fromBlock: blockNumber("from_block").notNull(),
+    toBlock: blockNumber("to_block").notNull(),
+    provider: text("provider").notNull(),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status").notNull(),
+    blocksChecked: integer("blocks_checked").notNull(),
+    hashMismatches: jsonb("hash_mismatches").$type<ReconciliationMismatch[]>().notNull(),
+    storedLogCount: integer("stored_log_count").notNull(),
+    observedLogCount: integer("observed_log_count").notNull(),
+    explanation: text("explanation"),
+  },
+  (t) => [
+    index("reconciliations_range_idx").on(t.chainId, t.fromBlock),
+    check("reconciliations_status_check", sql`${t.status} in ('match', 'mismatch')`),
+  ],
+);
+
+/** Periodic head/finality/storage positions, for lag percentiles without an external metrics store. */
+export const lagSamples = ops.table(
+  "lag_samples",
+  {
+    chainId: integer("chain_id").notNull(),
+    sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull().defaultNow(),
+    headBlock: blockNumber("head_block").notNull(),
+    finalizedBlock: blockNumber("finalized_block").notNull(),
+    storedTip: blockNumber("stored_tip"),
+  },
+  (t) => [primaryKey({ columns: [t.chainId, t.sampledAt] })],
 );

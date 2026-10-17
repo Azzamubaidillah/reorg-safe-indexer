@@ -15,6 +15,13 @@
       "when": 1792231637835,
       "tag": "0001_ops_reorgs",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792232640788,
+      "tag": "0002_ops_quality_reconciliation",
+      "breakpoints": true
     }
   ]
 }
