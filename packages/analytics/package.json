@@ -1,0 +1,13 @@
+{
+  "name": "@rsi/analytics",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.6-r.1",
+    "@rsi/db": "workspace:*",
+    "drizzle-orm": "0.45.4"
+  }
+}
