@@ -29,7 +29,7 @@ export interface CommitInput {
 // Postgres allows 65,535 bind parameters per statement.
 const MAX_BIND_PARAMS = 60_000;
 
-async function insertChunked<T extends object>(rows: T[], columns: number, insert: (chunk: T[]) => Promise<unknown>): Promise<void> {
+export async function insertChunked<T extends object>(rows: T[], columns: number, insert: (chunk: T[]) => Promise<unknown>): Promise<void> {
   const size = Math.floor(MAX_BIND_PARAMS / columns);
   for (let i = 0; i < rows.length; i += size) await insert(rows.slice(i, i + size));
 }
@@ -45,6 +45,38 @@ export async function resumePoint(database: Database, chainId: number, startBloc
     throw new Error(`committed ranges begin at block ${row.first} but START_BLOCK is ${startBlock}`);
   }
   return Number(row.last) + 1;
+}
+
+export type DbTransaction = Parameters<Parameters<Database["db"]["transaction"]>[0]>[0];
+
+/** Inserts a range's headers, landing logs and decoded rows; the caller owns the transaction and the ops.ranges row. */
+export async function insertRangeRows(tx: DbTransaction, chainId: number, range: FetchedRange, decoded: DecodedRange): Promise<void> {
+  await insertChunked(range.blocks, 4, (chunk) =>
+    tx
+      .insert(blocks)
+      .values(chunk.map((b) => ({ chainId, number: b.number, hash: b.hash, parentHash: b.parentHash, timestamp: new Date(b.timestamp * 1000) })))
+      .onConflictDoNothing(),
+  );
+  await insertChunked(range.logs, 9, (chunk) => tx.insert(logs).values(chunk.map((l) => ({ chainId, ...l }))).onConflictDoNothing());
+  await insertChunked(decoded.transfers, 9, (chunk) =>
+    tx
+      .insert(erc20Transfers)
+      .values(
+        chunk.map((t) => ({
+          chainId,
+          blockNumber: t.blockNumber,
+          blockHash: t.blockHash,
+          logIndex: t.logIndex,
+          txHash: t.txHash,
+          token: t.token,
+          fromAddress: t.from,
+          toAddress: t.to,
+          value: t.value,
+        })),
+      )
+      .onConflictDoNothing(),
+  );
+  await insertChunked(decoded.swaps, 13, (chunk) => tx.insert(uniswapV3Swaps).values(chunk.map((s) => ({ chainId, ...s }))).onConflictDoNothing());
 }
 
 /** Writes one range (data, range row, run progress) atomically; a crash leaves either all of it or none. */
@@ -71,32 +103,7 @@ export async function commitRange(database: Database, input: CommitInput): Promi
       throw new ContinuityError(`block ${range.from} parentHash ${first.parentHash} does not extend stored block ${prev.hash}`);
     }
 
-    await insertChunked(range.blocks, 4, (chunk) =>
-      tx
-        .insert(blocks)
-        .values(chunk.map((b) => ({ chainId, number: b.number, hash: b.hash, parentHash: b.parentHash, timestamp: new Date(b.timestamp * 1000) })))
-        .onConflictDoNothing(),
-    );
-    await insertChunked(range.logs, 9, (chunk) => tx.insert(logs).values(chunk.map((l) => ({ chainId, ...l }))).onConflictDoNothing());
-    await insertChunked(decoded.transfers, 9, (chunk) =>
-      tx
-        .insert(erc20Transfers)
-        .values(
-          chunk.map((t) => ({
-            chainId,
-            blockNumber: t.blockNumber,
-            blockHash: t.blockHash,
-            logIndex: t.logIndex,
-            txHash: t.txHash,
-            token: t.token,
-            fromAddress: t.from,
-            toAddress: t.to,
-            value: t.value,
-          })),
-        )
-        .onConflictDoNothing(),
-    );
-    await insertChunked(decoded.swaps, 13, (chunk) => tx.insert(uniswapV3Swaps).values(chunk.map((s) => ({ chainId, ...s }))).onConflictDoNothing());
+    await insertRangeRows(tx, chainId, range, decoded);
 
     await tx.insert(ranges).values({
       chainId,
