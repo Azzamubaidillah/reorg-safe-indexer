@@ -29,6 +29,12 @@ export interface SyntheticChainOptions {
   pools?: Hex[];
 }
 
+interface ForkPoint {
+  parent: SyntheticChain;
+  /** First height that differs from `parent`; lower heights are the parent's, hash for hash. */
+  height: number;
+}
+
 const UINT256_MAX = 2n ** 256n - 1n;
 
 /**
@@ -43,12 +49,22 @@ export class SyntheticChain {
   readonly tokens: Hex[];
   readonly pools: Hex[];
   private readonly seed: string;
+  private readonly forkPoint: ForkPoint | undefined;
   private readonly blockCache = new Map<number, { header: BlockHeader; entries: SyntheticEntry[]; decoys: RawLog[] }>();
 
-  constructor(options: SyntheticChainOptions = {}) {
+  constructor(options: SyntheticChainOptions = {}, forkPoint?: ForkPoint) {
     this.seed = options.seed ?? "main";
     this.tokens = options.tokens ?? [TEST_TOKEN];
     this.pools = options.pools ?? [TEST_POOL];
+    this.forkPoint = forkPoint;
+  }
+
+  /**
+   * A competing chain sharing every block below `height` with this one and diverging from `height` up:
+   * new hashes, new logs, and block `height` points at this chain's block `height - 1`.
+   */
+  fork(height: number, seed: string): SyntheticChain {
+    return new SyntheticChain({ seed, tokens: this.tokens, pools: this.pools }, { parent: this, height });
   }
 
   header(n: number): BlockHeader {
@@ -101,7 +117,8 @@ export class SyntheticChain {
     return `0x${keccak256(toHex(`${this.seed}:${n}:${label}`)).slice(26)}`;
   }
 
-  private block(n: number) {
+  private block(n: number): { header: BlockHeader; entries: SyntheticEntry[]; decoys: RawLog[] } {
+    if (this.forkPoint && n < this.forkPoint.height) return this.forkPoint.parent.block(n);
     let b = this.blockCache.get(n);
     if (!b) {
       b = this.build(n);
@@ -111,7 +128,8 @@ export class SyntheticChain {
   }
 
   private build(n: number) {
-    const hashOf = (height: number): Hex => keccak256(toHex(`${this.seed}:block:${height}`));
+    const hashOf = (height: number): Hex =>
+      this.forkPoint && height < this.forkPoint.height ? this.forkPoint.parent.header(height).hash : keccak256(toHex(`${this.seed}:block:${height}`));
     const blockHash = hashOf(n);
     const header: BlockHeader = {
       number: n,

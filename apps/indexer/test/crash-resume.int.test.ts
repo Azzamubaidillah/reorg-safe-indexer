@@ -27,7 +27,9 @@ async function committedRanges(): Promise<number> {
 /** Postgres releases the dead process's advisory lock when it notices the closed socket; wait for that. */
 async function waitForLockRelease(): Promise<void> {
   await waitFor("advisory lock release", async () => {
-    const [row] = await database.sql<{ n: number }[]>`select count(*)::int as n from pg_locks where locktype = 'advisory'`;
+    const [row] = await database.sql<{ n: number }[]>`
+      select count(*)::int as n from pg_locks
+      where locktype = 'advisory' and database = (select oid from pg_database where datname = current_database())`;
     return row?.n === 0 ? true : undefined;
   });
 }

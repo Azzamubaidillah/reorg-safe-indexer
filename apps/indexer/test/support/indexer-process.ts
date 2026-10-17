@@ -13,6 +13,9 @@ export interface IndexerEnv {
   endBlock?: number;
   rangeSize: number;
   fetchConcurrency?: number;
+  /** Defaults are short so tests following a moving head do not wait on real-world polling cadence. */
+  headPollIntervalMs?: number;
+  pollIntervalMs?: number;
 }
 
 export interface IndexerProcess {
@@ -42,6 +45,8 @@ export function spawnIndexer(options: IndexerEnv): IndexerProcess {
     START_BLOCK: String(options.startBlock),
     RANGE_SIZE: String(options.rangeSize),
     FETCH_CONCURRENCY: String(options.fetchConcurrency ?? 2),
+    HEAD_POLL_INTERVAL_MS: String(options.headPollIntervalMs ?? 50),
+    POLL_INTERVAL_MS: String(options.pollIntervalMs ?? 200),
     LOG_LEVEL: "info",
     ...(options.endBlock === undefined ? {} : { END_BLOCK: String(options.endBlock) }),
   };

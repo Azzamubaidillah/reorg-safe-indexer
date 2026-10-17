@@ -1,0 +1,8 @@
+**/node_modules
+.git
+.github
+docs
+apps/indexer/test
+contracts
+*.log
+.env

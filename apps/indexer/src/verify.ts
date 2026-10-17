@@ -75,6 +75,18 @@ const CHECKS: Record<string, string> = {
     select s.block_number, s.log_index from chain.uniswap_v3_swaps s
     left join chain.logs l on l.chain_id = s.chain_id and l.block_hash = s.block_hash and l.log_index = s.log_index
     where s.chain_id = $1 and l.log_index is null`,
+  // A hash orphaned by a rollback must be gone. It may legitimately come back if the chain re-forked
+  // onto it; then a range committed after the rollback covers it.
+  orphaned_block_still_stored: `
+    select rr.id as reorg_id, o.ref->>'number' as block_number, o.ref->>'hash' as hash
+    from ops.reorgs rr
+    cross join lateral jsonb_array_elements(rr.orphaned) o(ref)
+    join chain.blocks b on b.chain_id = rr.chain_id and b.hash = o.ref->>'hash'
+    where rr.chain_id = $1 and rr.action = 'rolled_back'
+      and not exists (
+        select 1 from ops.ranges r
+        where r.chain_id = b.chain_id and b.number between r.from_block and r.to_block and r.committed_at > rr.detected_at
+      )`,
 };
 
 export async function verifyIntegrity(database: Database, chainId: number): Promise<IntegrityReport> {

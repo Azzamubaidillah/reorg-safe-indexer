@@ -1,7 +1,7 @@
-import { createDb, erc20Transfers, uniswapV3Swaps, type Database } from "@rsi/db";
+import { createDb, erc20Transfers, reorgs, uniswapV3Swaps, type Database } from "@rsi/db";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { payloadSha256 } from "../src/payload.ts";
-import { commitRange, ContinuityError, PayloadMismatchError, resumePoint, startRun } from "../src/store.ts";
+import { commitRange, ContinuityError, PayloadMismatchError, recordHalt, resumePoint, rollbackTo, startRun, type RollbackInput } from "../src/store.ts";
 import type { DecodedRange, FetchedRange } from "../src/types.ts";
 import { verifyIntegrity, type IntegrityReport } from "../src/verify.ts";
 import { resetDatabase, tableFingerprints, TEST_DATABASE_URL } from "./support/db.ts";
@@ -257,5 +257,124 @@ describe("verifyIntegrity", () => {
 
     expect(report.ok).toBe(false);
     expect(failedChecks(report)).toContain("range_decode_balance");
+  });
+});
+
+describe("rollbackTo", () => {
+  const rollback = (ancestorBlock: number, overrides: Partial<RollbackInput> = {}) => {
+    const orphaned = chain.fetched(ancestorBlock + 1, 1059).blocks.map((b) => ({ number: b.number, hash: b.hash }));
+    return rollbackTo(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1000, ancestorBlock, forkBlock: ancestorBlock + 1, depth: orphaned.length, orphaned, canonical: [], ...overrides });
+  };
+
+  it("drops whole ranges past the ancestor, including their still-canonical blocks, and nothing else", async () => {
+    await commitAll();
+
+    // 1025 sits inside the second range: that range is re-ingested whole, so its blocks 1020..1025 go too.
+    expect(await rollback(1025)).toEqual({ rollbackFrom: 1020 });
+
+    const kept = new SyntheticChain();
+    const expected = kept.totals(1000, 1019);
+    const report = await verifyIntegrity(database, CHAIN_ID);
+    expect(report.problems).toEqual([]);
+    expect(report).toMatchObject({ lastBlock: 1019 });
+    expect(report.counts).toEqual({ ranges: 1, blocks: expected.blocks, logs: expected.logs, transfers: expected.transfers, swaps: expected.swaps, rejects: 0 });
+    expect(await resumePoint(database, CHAIN_ID, START)).toBe(1020);
+
+    const [row] = await database.db.select().from(reorgs);
+    expect(row).toMatchObject({ action: "rolled_back", ancestorBlock: 1025, rollbackFrom: 1020, forkBlock: 1026, depth: 34, finalizedBlock: 1000, runId: RUN_ID });
+    const [run] = await database.sql<{ last_block: string }[]>`select last_block from ops.runs where id = ${RUN_ID}`;
+    expect(Number(run?.last_block)).toBe(1019);
+  });
+
+  it("keeps a range that ends exactly at the ancestor", async () => {
+    await commitAll();
+    expect(await rollback(1039)).toEqual({ rollbackFrom: 1040 });
+    expect((await verifyIntegrity(database, CHAIN_ID)).counts.ranges).toBe(2);
+  });
+
+  it("accepts the canonical replacement afterwards, which proves the stored tip links to it", async () => {
+    await commitAll();
+    await rollback(1025);
+
+    const fork = chain.fork(1026, "fork");
+    await commit(fork.fetched(1020, 1039), fork.decoded(1020, 1039));
+    await commit(fork.fetched(1040, 1059), fork.decoded(1040, 1059));
+
+    const report = await verifyIntegrity(database, CHAIN_ID);
+    expect(report.problems).toEqual([]);
+    expect(report.counts.blocks).toBe(60);
+  });
+
+  it("is atomic: a failed audit insert undoes the deletes", async () => {
+    await commitAll();
+    const before = await tableFingerprints(database);
+
+    await expect(rollback(1025, { runId: "no-such-run" })).rejects.toThrow();
+
+    expect(await tableFingerprints(database)).toEqual(before);
+  });
+
+  it("refuses an ancestor at or above the stored tip and writes nothing", async () => {
+    await commitAll();
+    const before = await tableFingerprints(database);
+
+    await expect(rollback(1059)).rejects.toThrow(/no committed range/);
+
+    expect(await tableFingerprints(database)).toEqual(before);
+  });
+});
+
+describe("recordHalt", () => {
+  it("writes the audit row and leaves all data alone", async () => {
+    await commitAll();
+    const before = await tableFingerprints(database);
+
+    await recordHalt(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1050, forkBlock: 1050, depth: 10, orphaned: [{ number: 1050, hash: chain.header(1050).hash }], canonical: [] });
+
+    const [row] = await database.db.select().from(reorgs);
+    expect(row).toMatchObject({ action: "halted", ancestorBlock: null, rollbackFrom: null, forkBlock: 1050 });
+    const after = await tableFingerprints(database);
+    expect({ ...after, "ops.reorgs": "" }).toEqual({ ...before, "ops.reorgs": "" });
+  });
+});
+
+describe("verifyIntegrity: reorg audit", () => {
+  const claimOrphaned = (height: number, detectedAt: Date) =>
+    database.db.insert(reorgs).values({
+      chainId: CHAIN_ID,
+      runId: RUN_ID,
+      detectedAt,
+      action: "rolled_back",
+      ancestorBlock: height - 1,
+      forkBlock: height,
+      depth: 1,
+      rollbackFrom: height,
+      finalizedBlock: 1000,
+      orphaned: [{ number: height, hash: chain.header(height).hash }],
+      canonical: [],
+    });
+
+  it("flags an orphaned hash that is still stored with no later re-ingest", async () => {
+    await commitAll();
+    await claimOrphaned(1030, new Date(Date.now() + 60_000));
+
+    const report = await verifyIntegrity(database, CHAIN_ID);
+
+    expect(report.ok).toBe(false);
+    expect(report.problems.find((p) => p.check === "orphaned_block_still_stored")).toMatchObject({ count: 1, sample: [{ block_number: "1030", hash: chain.header(1030).hash }] });
+  });
+
+  it("accepts an orphaned hash that was re-ingested after the reorg (the chain forked back)", async () => {
+    await commitAll();
+    await claimOrphaned(1030, new Date(Date.now() - 60_000));
+
+    expect((await verifyIntegrity(database, CHAIN_ID)).ok).toBe(true);
+  });
+
+  it("ignores halted rows, whose orphaned blocks are deliberately kept", async () => {
+    await commitAll();
+    await recordHalt(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1050, forkBlock: 1050, depth: 1, orphaned: [{ number: 1050, hash: chain.header(1050).hash }], canonical: [] });
+
+    expect((await verifyIntegrity(database, CHAIN_ID)).ok).toBe(true);
   });
 });

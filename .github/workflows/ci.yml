@@ -37,7 +37,52 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:integration
+      # Same database as the integration suite, so the two projects run as separate steps, never together.
+      - run: pnpm vitest run --project anvil
+
+  # The reorg suites must be deterministic, not merely usually green: ten independent runs of each, all required.
+  reorg-flake-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: indexer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d indexer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/indexer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+      - run: pnpm install --frozen-lockfile
+      # The filter matches test file paths; vitest exits non-zero if it matches nothing, so a rename cannot silently empty this job.
+      - name: Reorg replay against the mock RPC (run ${{ matrix.run }}/10)
+        run: pnpm vitest run --project integration reorg
+      - name: Reorg against anvil (run ${{ matrix.run }}/10)
+        run: pnpm vitest run --project anvil
