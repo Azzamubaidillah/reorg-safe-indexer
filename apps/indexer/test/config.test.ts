@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, loadRetentionConfig } from "../src/config.ts";
 
 const base = {
   DATABASE_URL: "postgres://localhost/x",
@@ -53,5 +53,47 @@ describe("loadConfig M3 settings", () => {
       { name: "second", url: "http://localhost:8546", maxSpan: 10, rps: 1 },
     ]);
     expect(() => loadConfig({ ...base, RPC_PROVIDERS: rpc, RECONCILE_PROVIDER: JSON.stringify(mock) })).toThrow(/must differ from every RPC_PROVIDERS name/);
+  });
+});
+
+describe("retention settings", () => {
+  const DAY = 86_400_000;
+
+  it("defaults: 7 days of landing, decoded rows kept forever, hourly cycle of at most 500 ranges", () => {
+    const expected = {
+      retention: { landingRetentionMs: 7 * DAY, decodedRetentionMs: undefined, analyticsManifestPath: undefined, maxRanges: 500 },
+      retentionIntervalMs: 3_600_000,
+    };
+    expect(loadConfig(base)).toMatchObject(expected);
+    expect(loadRetentionConfig({})).toEqual(expected);
+  });
+
+  it("reads every override, in days for the retention periods", () => {
+    const env = {
+      LANDING_RETENTION_DAYS: "0.5",
+      DECODED_RETENTION_DAYS: "14",
+      ANALYTICS_MANIFEST_PATH: "/data/analytics/_manifest.json",
+      RETENTION_INTERVAL_MS: "60000",
+      RETENTION_MAX_RANGES: "10",
+    };
+    const expected = {
+      retention: { landingRetentionMs: DAY / 2, decodedRetentionMs: 14 * DAY, analyticsManifestPath: "/data/analytics/_manifest.json", maxRanges: 10 },
+      retentionIntervalMs: 60_000,
+    };
+    expect(loadConfig({ ...base, ...env })).toMatchObject(expected);
+    expect(loadRetentionConfig(env)).toEqual(expected);
+  });
+
+  it("rejects non-positive values", () => {
+    for (const bad of [{ LANDING_RETENTION_DAYS: "0" }, { DECODED_RETENTION_DAYS: "-1", ANALYTICS_MANIFEST_PATH: "/m" }, { RETENTION_INTERVAL_MS: "0" }, { RETENTION_MAX_RANGES: "0" }, { RETENTION_MAX_RANGES: "1.5" }]) {
+      expect(() => loadConfig({ ...base, ...bad }), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it("refuses DECODED_RETENTION_DAYS without a manifest, which would silently keep decoded rows forever", () => {
+    expect(() => loadConfig({ ...base, DECODED_RETENTION_DAYS: "14" })).toThrow(/needs ANALYTICS_MANIFEST_PATH/);
+    expect(() => loadRetentionConfig({ DECODED_RETENTION_DAYS: "14" })).toThrow(/needs ANALYTICS_MANIFEST_PATH/);
+    // A manifest alone is harmless: decoded rows are kept because no decoded retention is set.
+    expect(loadConfig({ ...base, ANALYTICS_MANIFEST_PATH: "/m" }).retention.decodedRetentionMs).toBeUndefined();
   });
 });

@@ -405,6 +405,20 @@ describe("reorgs and status", () => {
     ]);
     expect(page.items[1]).toMatchObject({ detectedAt: new Date(NOW - 3600_000).toISOString(), finalizedBlock: 900, orphaned: [ref(1011), ref(1012)], canonical: [ref(2011), ref(2012)] });
     expect(await walk("/v1/reorgs", 1)).toEqual(page.items);
+    // Neither has been acknowledged: the halt still blocks a restart, and a rollback never takes an acknowledgement.
+    expect(page.items.map((r) => [r.acknowledgedAt, r.acknowledgement])).toEqual([[null, null], [null, null]]);
+  });
+
+  it("shows when and why a halt was acknowledged, in the list and as the last reorg of the status", async () => {
+    await seedReorgs();
+    await database.sql`
+      update ops.reorgs set acknowledged_at = ${new Date(NOW - 30_000).toISOString()}, acknowledgement = 'provider reorged inside finality, checked against two others'
+      where chain_id = ${CHAIN_ID} and action = 'halted'`;
+
+    const page = ReorgsPage.parse(await ok("/v1/reorgs"));
+    expect(page.items[0]).toMatchObject({ action: "halted", acknowledgedAt: new Date(NOW - 30_000).toISOString(), acknowledgement: "provider reorged inside finality, checked against two others" });
+    expect(page.items[1]).toMatchObject({ action: "rolled_back", acknowledgedAt: null, acknowledgement: null });
+    expect(Status.parse(await ok("/v1/status")).lastReorg).toEqual(page.items[0]);
   });
 
   it("reports an empty database without nulls where numbers are promised", async () => {
@@ -422,6 +436,7 @@ describe("reorgs and status", () => {
       reconciliation: { match: 0, mismatch: 0, unexplained: 0 },
       lag1h: null,
       lastReorg: null,
+      retention: { landingPurgedThroughBlock: null, decodedPurgedThroughBlock: null, landingRetentionDays: null, decodedRetentionDays: null },
     });
     expect(status.ranges.published).toEqual({ ranges: 0, blocks: 0, logs: 0 });
     expect(status.lastRun).toMatchObject({ id: RUN_ID, status: "running" });
@@ -467,6 +482,42 @@ describe("reorgs and status", () => {
     expect(status.lag1h).toMatchObject({ samples: 2, p50: 50.5, max: 51 });
     expect(status.lag1h!.p95).toBeCloseTo(50.95, 9);
     expect(status.lastReorg).toMatchObject({ action: "halted", forkBlock: 950 });
+  });
+});
+
+describe("retention", () => {
+  /** What the indexer's retention leaves behind: landing logs of two ranges gone, decoded rows of the first gone too. */
+  async function purge(): Promise<void> {
+    await commitSpans(database, chain, SPANS);
+    for (const [from] of SPANS) await setStatus(database, from, "published");
+    await database.sql`delete from chain.logs where block_number between 1000 and 1039`;
+    await database.sql`delete from chain.erc20_transfers where block_number between 1000 and 1019`;
+    await database.sql`delete from chain.uniswap_v3_swaps where block_number between 1000 and 1019`;
+    await database.sql`update ops.ranges set landing_purged_at = now() where from_block in (1000, 1020)`;
+    await database.sql`update ops.ranges set decoded_purged_at = now() where from_block = 1000`;
+  }
+
+  it("reports how far each class is purged, and the configured days when the API was told them", async () => {
+    await purge();
+    expect(Status.parse(await ok("/v1/status")).retention).toEqual({ landingPurgedThroughBlock: 1039, decodedPurgedThroughBlock: 1019, landingRetentionDays: null, decodedRetentionDays: null });
+
+    const configured = await buildApp({ database, analytics: fakeAnalytics, chainId: CHAIN_ID, now: () => NOW, retentionDays: { landing: 7, decoded: 14 } });
+    try {
+      const res = await configured.inject({ method: "GET", url: "/v1/status" });
+      expect(Status.parse(res.json()).retention).toEqual({ landingPurgedThroughBlock: 1039, decodedPurgedThroughBlock: 1019, landingRetentionDays: 7, decodedRetentionDays: 14 });
+    } finally {
+      await configured.close();
+    }
+  });
+
+  it("serves the rows that still exist and keeps describing purged ranges by their counts", async () => {
+    await purge();
+
+    expect(TransfersPage.parse(await ok("/v1/transfers?limit=200")).items).toEqual(expectedTransfers(1020, 1059));
+    expect(SwapsPage.parse(await ok("/v1/swaps?limit=200")).items).toEqual(expectedSwaps(1020, 1059));
+    const { transfers, swaps, logs } = chain.totals(1000, 1019);
+    expect(RangeDetail.parse(await ok("/v1/ranges/1000"))).toMatchObject({ status: "published", logCount: logs, transferCount: transfers, swapCount: swaps });
+    expect(RangesPage.parse(await ok("/v1/ranges?limit=10")).items.map((r) => [r.fromBlock, r.status])).toEqual([[1040, "published"], [1020, "published"], [1000, "published"]]);
   });
 });
 

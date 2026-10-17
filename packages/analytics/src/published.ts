@@ -32,12 +32,18 @@ export function publishedInDay(sql: Tx, chainId: number, kind: Kind, window: Day
       and b.timestamp >= ${window.start.toISOString()}::timestamptz and b.timestamp < ${window.end.toISOString()}::timestamptz`;
 }
 
-/** Number of decoded rows of `kind` in published ranges, over all time. Independent of day windows and manifests. */
-export async function countPublished(sql: Tx, chainId: number, kind: Kind): Promise<number> {
+/**
+ * Number of decoded rows of `kind` in published ranges, over all time. Independent of day windows and manifests.
+ * Rows inside `excluded` (inclusive block intervals) are left out: the spans of days whose rows were purged.
+ */
+export async function countPublished(sql: Tx, chainId: number, kind: Kind, excluded: readonly (readonly [number, number])[] = []): Promise<number> {
   const [row] = await sql<{ n: string }[]>`
     select count(*)::text as n
     from ops.ranges r
     join chain.${sql(TABLES[kind])} t on t.chain_id = r.chain_id and t.block_number between r.from_block and r.to_block
-    where r.chain_id = ${chainId} and r.status = 'published'`;
+    where r.chain_id = ${chainId} and r.status = 'published'
+      and not exists (
+        select 1 from unnest(${sql.array(excluded.map(([from]) => from))}::bigint[], ${sql.array(excluded.map(([, to]) => to))}::bigint[]) as x(lo, hi)
+        where t.block_number between x.lo and x.hi)`;
   return Number(row?.n ?? 0);
 }

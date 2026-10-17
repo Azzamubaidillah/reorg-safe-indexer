@@ -4,7 +4,7 @@ import { inArray } from "drizzle-orm";
 import pino, { type Logger } from "pino";
 import { Alerter } from "./alerts.ts";
 import { parseSince } from "./cli.ts";
-import { loadConfig, type Config } from "./config.ts";
+import { loadConfig, loadRetentionConfig, type Config } from "./config.ts";
 import { lagReport, pruneLagSamples, recordLagSample } from "./lag.ts";
 import { Metrics } from "./metrics.ts";
 import { runPipeline } from "./pipeline.ts";
@@ -12,17 +12,18 @@ import { runQualityCycle } from "./quality.ts";
 import { verifyRebuild } from "./rebuild.ts";
 import { explainReconciliation, reconcileRanges, unexplainedMismatches } from "./reconcile.ts";
 import { ReorgBelowFinalizedError } from "./reorg.ts";
+import { planRetention, runRetentionCycle } from "./retention.ts";
 import { RpcPool } from "./rpc/pool.ts";
 import { Provider } from "./rpc/provider.ts";
 import { startStatusServer, type StatusServer } from "./status.ts";
-import { abandonStaleRuns, finishRun, resumePoint, startRun } from "./store.ts";
+import { abandonStaleRuns, acknowledgeHalt, finishRun, resumePoint, startRun, unacknowledgedHalt } from "./store.ts";
 import { runEvery } from "./ticker.ts";
 import { verifyIntegrity } from "./verify.ts";
 
 // Namespace for the per-chain advisory lock: pg_try_advisory_lock(LOCK_NAMESPACE, chainId).
 const LOCK_NAMESPACE = 0x72736900;
-// Lock connection + pipeline + quality + reconcile + lag/status queries each need one connection at a time.
-const RUN_POOL_SIZE = 6;
+// Lock connection + pipeline + quality + reconcile + retention + lag/status queries each need one connection at a time.
+const RUN_POOL_SIZE = 7;
 const HOUR_MS = 3_600_000;
 const DEFAULT_LAG_REPORT_WINDOW = "24h";
 
@@ -45,6 +46,25 @@ async function run(): Promise<number> {
       return 1;
     }
 
+    const abandoned = await abandonStaleRuns(database, config.chainId);
+    if (abandoned > 0) log.warn({ abandoned }, "marked stale runs as abandoned");
+
+    // A halt stays in force until acknowledged: Docker restarts a failed container whatever its exit code, and a
+    // restart would only detect the same fork again. Checked before the status server or any RPC call.
+    const halt = await unacknowledgedHalt(database, config.chainId);
+    if (halt) {
+      const reason = `halted: unacknowledged reorg #${halt.id}`;
+      const refusedRun = randomUUID();
+      await startRun(database, refusedRun, config.chainId);
+      await finishRun(database, refusedRun, { status: "failed", reason });
+      log.fatal(
+        { chainId: config.chainId, reorgId: halt.id, forkBlock: halt.forkBlock, finalizedBlock: halt.finalizedBlock, detectedAt: halt.detectedAt },
+        `${reason}; after checking the cause run: ack-halt ${halt.id} "<why it is safe to continue>"`,
+      );
+      await alerter.haltUnacknowledged({ chainId: config.chainId, reorgId: halt.id });
+      return 2;
+    }
+
     if (config.metricsPort !== undefined) {
       statusServer = await startStatusServer(database, metrics, {
         chainId: config.chainId,
@@ -54,9 +74,6 @@ async function run(): Promise<number> {
       });
       log.info({ host: config.metricsHost, port: statusServer.port }, "status server listening");
     }
-
-    const abandoned = await abandonStaleRuns(database, config.chainId);
-    if (abandoned > 0) log.warn({ abandoned }, "marked stale runs as abandoned");
 
     const nextBlock = await resumePoint(database, config.chainId, config.startBlock);
     const runId = randomUUID();
@@ -155,7 +172,7 @@ interface BackgroundInput {
   signal: AbortSignal;
 }
 
-/** Quality gates, reconciliation, lag samples and pruning, each on its own timer beside the pipeline. */
+/** Quality gates, reconciliation, retention, lag samples and pruning, each on its own timer beside the pipeline. */
 function startBackground(input: BackgroundInput): Promise<unknown> {
   const { config, database, pool, metrics, alerter, log, runId, signal } = input;
   const { chainId } = config;
@@ -215,6 +232,27 @@ function startBackground(input: BackgroundInput): Promise<unknown> {
   }
 
   loops.push(
+    every("retention", config.retentionIntervalMs, async () => {
+      const summary = await runRetentionCycle(database, { chainId, ...config.retention });
+      if (summary.manifestProblem) log.warn({ problem: summary.manifestProblem }, "decoded rows not purged");
+      if (summary.landing.length + summary.decoded.length > 0) {
+        // Counts and the newest purged block, not one entry per range: a first cycle can purge hundreds.
+        log.info(
+          {
+            landingRanges: summary.landing.length,
+            landingPurgedThrough: summary.landing.at(-1)?.toBlock,
+            logsDeleted: summary.landing.reduce((sum, r) => sum + r.deleted.logs, 0),
+            decodedRanges: summary.decoded.length,
+            decodedPurgedThrough: summary.decoded.at(-1)?.toBlock,
+            decodedRowsDeleted: summary.decoded.reduce((sum, r) => sum + r.deleted.transfers + r.deleted.swaps, 0),
+          },
+          "retention cycle",
+        );
+      }
+    }),
+  );
+
+  loops.push(
     every("lag", config.lagSampleIntervalMs, async () => {
       const { headBlock, finalizedBlock, storedTip } = metrics.snapshot();
       if (headBlock === null || finalizedBlock === null) return;
@@ -240,6 +278,16 @@ async function withDatabase<T>(work: (database: Database, chainId: number) => Pr
   }
 }
 
+async function retentionCommand(args: string[]): Promise<number> {
+  if (args.length !== 1 || args[0] !== "--dry-run") {
+    console.error("usage: main.ts retention --dry-run");
+    return 2;
+  }
+  const { retention } = loadRetentionConfig();
+  printJson(await withDatabase((database, chainId) => planRetention(database, { chainId, ...retention })));
+  return 0;
+}
+
 const verify = () =>
   withDatabase(async (database, chainId) => {
     const report = await verifyIntegrity(database, chainId);
@@ -254,6 +302,17 @@ async function rebuildVerify(): Promise<number> {
     printJson(report);
     return report.equal ? 0 : 1;
   });
+}
+
+async function ackHalt([id, ...words]: string[]): Promise<number> {
+  const reorgId = Number(id);
+  if (!Number.isInteger(reorgId) || reorgId <= 0 || words.join(" ").trim() === "") {
+    console.error("usage: main.ts ack-halt <reorgId> <text>");
+    return 2;
+  }
+  await withDatabase((database, chainId) => acknowledgeHalt(database, chainId, reorgId, words.join(" ")));
+  printJson({ id: reorgId, acknowledged: true });
+  return 0;
 }
 
 async function explain([id, ...words]: string[]): Promise<number> {
@@ -291,6 +350,8 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   run,
   verify,
   "rebuild-verify": rebuildVerify,
+  retention: retentionCommand,
+  "ack-halt": ackHalt,
   "explain-reconciliation": explain,
   reconciliations: reconciliationsCommand,
   "lag-report": lagReportCommand,

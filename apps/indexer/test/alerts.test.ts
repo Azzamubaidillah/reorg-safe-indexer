@@ -55,6 +55,14 @@ describe("Alerter delivery", () => {
     expect(sent[2]?.body.text).toContain("third");
   });
 
+  it("tells the operator which halt blocks the start and how to release it", async () => {
+    const { alerter, sent } = setup();
+    await alerter.haltUnacknowledged({ chainId: 1, reorgId: 7 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body.text).toContain("reorg #7");
+    expect(sent[0]?.body.text).toContain("ack-halt 7");
+  });
+
   it("dedups gate failures per gate, not per range", async () => {
     const { alerter, sent } = setup();
     await alerter.gateFailure({ gate: "row_counts", fromBlock: 0, toBlock: 99 });

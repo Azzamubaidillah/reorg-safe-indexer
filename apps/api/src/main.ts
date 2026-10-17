@@ -7,7 +7,14 @@ import { loadConfig } from "./config.ts";
 const config = loadConfig();
 const database = createDb(config.databaseUrl);
 const analytics = new AnalyticsReader({ dir: config.analyticsDir });
-const app = await buildApp({ database, analytics, chainId: config.chainId, corsOrigin: config.corsOrigin, logger: { level: config.logLevel } });
+const app = await buildApp({
+  database,
+  analytics,
+  chainId: config.chainId,
+  corsOrigin: config.corsOrigin,
+  logger: { level: config.logLevel },
+  retentionDays: { landing: config.landingRetentionDays, decoded: config.decodedRetentionDays },
+});
 
 const shutdown = new AbortController();
 

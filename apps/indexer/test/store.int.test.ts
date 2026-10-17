@@ -1,7 +1,7 @@
 import { createDb, erc20Transfers, reorgs, uniswapV3Swaps, type Database } from "@rsi/db";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { payloadSha256 } from "../src/payload.ts";
-import { commitRange, ContinuityError, PayloadMismatchError, recordHalt, resumePoint, rollbackTo, startRun, type RollbackInput } from "../src/store.ts";
+import { acknowledgeHalt, commitRange, ContinuityError, PayloadMismatchError, recordHalt, resumePoint, rollbackTo, startRun, unacknowledgedHalt, type RollbackInput } from "../src/store.ts";
 import type { DecodedRange, FetchedRange } from "../src/types.ts";
 import { verifyIntegrity, type IntegrityReport } from "../src/verify.ts";
 import { resetDatabase, tableFingerprints, TEST_DATABASE_URL } from "./support/db.ts";
@@ -335,6 +335,68 @@ describe("recordHalt", () => {
     expect(row).toMatchObject({ action: "halted", ancestorBlock: null, rollbackFrom: null, forkBlock: 1050 });
     const after = await tableFingerprints(database);
     expect({ ...after, "ops.reorgs": "" }).toEqual({ ...before, "ops.reorgs": "" });
+  });
+});
+
+describe("halt acknowledgement", () => {
+  const halt = (forkBlock: number, chainId = CHAIN_ID) =>
+    recordHalt(database, { chainId, runId: RUN_ID, finalizedBlock: forkBlock, forkBlock, depth: 1, orphaned: [{ number: forkBlock, hash: chain.header(forkBlock).hash }], canonical: [] });
+  const acknowledgements = () => database.sql<{ id: string; acknowledged: boolean; acknowledgement: string | null }[]>`
+    select id, acknowledged_at is not null as acknowledged, acknowledgement from ops.reorgs order by id`;
+
+  it("finds the oldest unacknowledged halt of the chain and nothing else", async () => {
+    expect(await unacknowledgedHalt(database, CHAIN_ID)).toBeUndefined();
+    await commitAll();
+    await rollbackTo(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1000, forkBlock: 1050, depth: 1, orphaned: [], canonical: [], ancestorBlock: 1049 });
+    await startRun(database, "run-2", 2);
+    await recordHalt(database, { chainId: 2, runId: "run-2", finalizedBlock: 5, forkBlock: 5, depth: 1, orphaned: [], canonical: [] });
+    expect(await unacknowledgedHalt(database, CHAIN_ID)).toBeUndefined();
+
+    await halt(1010);
+    await halt(1020);
+    expect(await unacknowledgedHalt(database, CHAIN_ID)).toMatchObject({ forkBlock: 1010, finalizedBlock: 1010 });
+  });
+
+  it("stores the trimmed text, releases only that halt, and refuses to acknowledge twice", async () => {
+    await halt(1010);
+    await halt(1020);
+    const [first, second] = await acknowledgements();
+
+    await acknowledgeHalt(database, CHAIN_ID, Number(first!.id), "  checked against two providers  ");
+
+    expect(await acknowledgements()).toEqual([
+      { id: first!.id, acknowledged: true, acknowledgement: "checked against two providers" },
+      { id: second!.id, acknowledged: false, acknowledgement: null },
+    ]);
+    expect(Number((await unacknowledgedHalt(database, CHAIN_ID))?.id)).toBe(Number(second!.id));
+    await expect(acknowledgeHalt(database, CHAIN_ID, Number(first!.id), "again")).rejects.toThrow(/already acknowledged/);
+    expect((await acknowledgements())[0]?.acknowledgement).toBe("checked against two providers");
+  });
+
+  it("refuses empty text, unknown ids, other chains and rollbacks, changing nothing", async () => {
+    await commitAll();
+    const { rollbackFrom } = await rollbackTo(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1000, forkBlock: 1050, depth: 1, orphaned: [], canonical: [], ancestorBlock: 1049 });
+    expect(rollbackFrom).toBe(1040);
+    await halt(1010);
+    const [rolledBack, halted] = (await acknowledgements()).map((r) => Number(r.id));
+    const before = await acknowledgements();
+
+    await expect(acknowledgeHalt(database, CHAIN_ID, halted!, "   ")).rejects.toThrow(/must not be empty/);
+    await expect(acknowledgeHalt(database, CHAIN_ID, 999_999, "why")).rejects.toThrow(/no reorg 999999/);
+    await expect(acknowledgeHalt(database, 2, halted!, "why")).rejects.toThrow(/no reorg/);
+    await expect(acknowledgeHalt(database, CHAIN_ID, rolledBack!, "why")).rejects.toThrow(/was rolled_back, only halts/);
+
+    expect(await acknowledgements()).toEqual(before);
+  });
+
+  it("is backed by the schema: only a halted row can carry an acknowledgement, and never an empty one", async () => {
+    await commitAll();
+    await rollbackTo(database, { chainId: CHAIN_ID, runId: RUN_ID, finalizedBlock: 1000, forkBlock: 1050, depth: 1, orphaned: [], canonical: [], ancestorBlock: 1049 });
+    await halt(1010);
+
+    await expect(database.sql`update ops.reorgs set acknowledged_at = now(), acknowledgement = 'x' where action = 'rolled_back'`).rejects.toThrow(/reorgs_ack_check/);
+    await expect(database.sql`update ops.reorgs set acknowledged_at = now(), acknowledgement = '' where action = 'halted'`).rejects.toThrow(/reorgs_ack_check/);
+    await expect(database.sql`update ops.reorgs set acknowledgement = 'x' where action = 'halted'`).rejects.toThrow(/reorgs_ack_check/);
   });
 });
 

@@ -22,6 +22,20 @@
       "when": 1792232640788,
       "tag": "0002_ops_quality_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792248619611,
+      "tag": "0003_ops_range_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792249701801,
+      "tag": "0004_ops_reorg_ack",
+      "breakpoints": true
     }
   ]
 }

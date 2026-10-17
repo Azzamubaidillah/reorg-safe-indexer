@@ -6,13 +6,19 @@ import { toJob, latestReorg } from "./ops.ts";
 const OPEN_JOB_LIMIT = 20;
 const LAG_WINDOW_MS = 3600 * 1000;
 
+/** Days the indexer keeps landing logs / decoded rows, as told to this API; undefined when it was not told. */
+export interface RetentionDays {
+  landing?: number | undefined;
+  decoded?: number | undefined;
+}
+
 const lagBetween = (ahead: number | null, behind: number | null): number | null => (ahead !== null && behind !== null ? Math.max(0, ahead - behind) : null);
 
 /** DB-only status: unlike the indexer's in-process /status it works while the indexer is down. */
-export async function buildStatus(database: Database, chainId: number, now: number): Promise<Status> {
+export async function buildStatus(database: Database, chainId: number, now: number, retentionDays: RetentionDays): Promise<Status> {
   const { sql } = database;
   const since = new Date(now - LAG_WINDOW_MS).toISOString();
-  const [sample, positions, rangeRows, jobRows, recon, lag, run, lastReorg] = await Promise.all([
+  const [sample, positions, rangeRows, jobRows, recon, lag, run, lastReorg, purged] = await Promise.all([
     sql<{ head_block: number; finalized_block: number; sampled_at: string }[]>`
       select head_block::float8, finalized_block::float8, ${iso(sql, "s.sampled_at")} as sampled_at
       from ops.lag_samples s where s.chain_id = ${chainId} order by s.sampled_at desc limit 1`,
@@ -49,6 +55,10 @@ export async function buildStatus(database: Database, chainId: number, now: numb
     sql<{ id: string; status: "running" | "succeeded" | "failed"; started_at: string; rpc_calls: Record<string, Record<string, number>> }[]>`
       select r.id, r.status, ${iso(sql, "r.started_at")} as started_at, r.rpc_calls from ops.runs r where r.chain_id = ${chainId} order by r.started_at desc, r.id desc limit 1`,
     latestReorg(database, chainId),
+    sql<{ landing: number | null; decoded: number | null }[]>`
+      select (max(to_block) filter (where landing_purged_at is not null))::float8 as landing,
+             (max(to_block) filter (where decoded_purged_at is not null))::float8 as decoded
+      from ops.ranges where chain_id = ${chainId}`,
   ]);
 
   const head = sample[0];
@@ -79,5 +89,11 @@ export async function buildStatus(database: Database, chainId: number, now: numb
     lag1h,
     lastRun: lastRun ? { id: lastRun.id, status: lastRun.status, startedAt: lastRun.started_at, rpcCalls: lastRun.rpc_calls } : null,
     lastReorg,
+    retention: {
+      landingPurgedThroughBlock: purged[0]?.landing ?? null,
+      decodedPurgedThroughBlock: purged[0]?.decoded ?? null,
+      landingRetentionDays: retentionDays.landing ?? null,
+      decodedRetentionDays: retentionDays.decoded ?? null,
+    },
   };
 }

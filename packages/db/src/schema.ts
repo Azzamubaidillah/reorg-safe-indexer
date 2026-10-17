@@ -123,6 +123,8 @@ export const runs = ops.table(
  * Status starts at `candidate`. A range is `published` only once every block in
  * it is finalized AND every data-quality gate passed (fail-closed publish);
  * a failing gate sets `failed` and enqueues one deterministic backfill job.
+ * Retention (`apps/indexer/src/retention.ts`) deletes the landing logs and later the decoded rows of old
+ * published ranges and records that here; blocks and every `ops` row are never purged.
  */
 export const ranges = ops.table(
   "ranges",
@@ -142,11 +144,17 @@ export const ranges = ops.table(
       .references(() => runs.id),
     committedAt: timestamp("committed_at", { withTimezone: true }).notNull().defaultNow(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    /** Set when the range's `chain.logs` rows were deleted by retention; the range row keeps its counts as evidence. */
+    landingPurgedAt: timestamp("landing_purged_at", { withTimezone: true }),
+    /** Set when the range's decoded rows were deleted; only ever set after `landing_purged_at`. */
+    decodedPurgedAt: timestamp("decoded_purged_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.chainId, t.fromBlock] }),
     check("ranges_bounds_check", sql`${t.toBlock} >= ${t.fromBlock}`),
     check("ranges_status_check", sql`${t.status} in ('candidate', 'published', 'failed')`),
+    // Landing goes first (decoded rows are rebuildable from it), and only finished ranges are ever purged.
+    check("ranges_purge_check", sql`(${t.landingPurgedAt} is null or ${t.status} = 'published') and (${t.decodedPurgedAt} is null or ${t.landingPurgedAt} is not null)`),
   ],
 );
 
@@ -164,6 +172,8 @@ export interface ReorgBlockRef {
  * `fork_block` is the first stored height whose hash differs from the canonical
  * chain; when halted it is the lowest stored height inspected (the true fork is
  * at or below it) and `depth` counts only the heights inspected.
+ * A `halted` row is sticky: `run` refuses to start while one has no `acknowledged_at`,
+ * which the operator sets with `ack-halt <id> <text>` once the cause is understood.
  */
 export const reorgs = ops.table(
   "reorgs",
@@ -182,6 +192,9 @@ export const reorgs = ops.table(
     finalizedBlock: blockNumber("finalized_block").notNull(),
     orphaned: jsonb("orphaned").$type<ReorgBlockRef[]>().notNull(),
     canonical: jsonb("canonical").$type<ReorgBlockRef[]>().notNull(),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    /** Why the operator judged it safe to continue; set together with `acknowledged_at`, and only on halted rows. */
+    acknowledgement: text("acknowledgement"),
   },
   (t) => [
     index("reorgs_chain_detected_idx").on(t.chainId, t.detectedAt),
@@ -189,6 +202,10 @@ export const reorgs = ops.table(
     check(
       "reorgs_shape_check",
       sql`(${t.action} = 'rolled_back' and ${t.ancestorBlock} is not null and ${t.rollbackFrom} is not null) or (${t.action} = 'halted' and ${t.ancestorBlock} is null and ${t.rollbackFrom} is null)`,
+    ),
+    check(
+      "reorgs_ack_check",
+      sql`(${t.acknowledgedAt} is null and ${t.acknowledgement} is null) or (${t.action} = 'halted' and ${t.acknowledgedAt} is not null and ${t.acknowledgement} <> '')`,
     ),
   ],
 );

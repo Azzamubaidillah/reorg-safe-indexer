@@ -133,7 +133,14 @@ function Overview({ status }: { status: Status }) {
         {lastReorg ? (
           <p className="text-slate-900">
             <Badge tone={lastReorg.action === "halted" ? "bad" : "warn"}>{lastReorg.action === "halted" ? "halted" : "rolled back"}</Badge> at block {formatInt(lastReorg.forkBlock)}, depth{" "}
-            {formatInt(lastReorg.depth)}, detected <Time value={lastReorg.detectedAt} /> ·{" "}
+            {formatInt(lastReorg.depth)}, detected <Time value={lastReorg.detectedAt} />
+            {lastReorg.action === "halted" && !lastReorg.acknowledgedAt ? (
+              <>
+                {" "}
+                <Badge tone="bad">not acknowledged</Badge>
+              </>
+            ) : null}{" "}
+            ·{" "}
             <Link href="/reorgs" className="text-blue-800 underline">
               all reorgs
             </Link>

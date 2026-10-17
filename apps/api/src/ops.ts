@@ -183,10 +183,12 @@ interface ReorgRow {
   finalized_block: number;
   orphaned: Reorg["orphaned"];
   canonical: Reorg["canonical"];
+  acknowledged_at: string | null;
+  acknowledgement: string | null;
 }
 
 const reorgColumns = (sql: Database["sql"]) => sql`
-  id::float8, ${iso(sql, "detected_at")} as detected_at, action, depth, fork_block::float8, ancestor_block::float8, rollback_from::float8, finalized_block::float8, orphaned, canonical`;
+  id::float8, ${iso(sql, "detected_at")} as detected_at, action, depth, fork_block::float8, ancestor_block::float8, rollback_from::float8, finalized_block::float8, orphaned, canonical, ${iso(sql, "acknowledged_at")} as acknowledged_at, acknowledgement`;
 
 const toReorg = (r: ReorgRow): Reorg => ({
   id: r.id,
@@ -199,6 +201,8 @@ const toReorg = (r: ReorgRow): Reorg => ({
   finalizedBlock: r.finalized_block,
   orphaned: r.orphaned,
   canonical: r.canonical,
+  acknowledgedAt: r.acknowledged_at,
+  acknowledgement: r.acknowledgement,
 });
 
 export async function listReorgs(database: Database, chainId: number, input: PageQuery): Promise<{ items: Reorg[]; nextCursor: string | null }> {

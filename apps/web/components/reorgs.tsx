@@ -16,6 +16,20 @@ function byHeight(reorg: Reorg): { height: number; orphaned?: BlockRef; canonica
   return [...rows.values()].sort((a, b) => a.height - b.height);
 }
 
+/** What a halt needs from the operator: the indexer refuses to start until it is acknowledged. */
+function Acknowledgement({ reorg }: { reorg: Reorg }) {
+  if (reorg.action !== "halted") return null;
+  return reorg.acknowledgedAt ? (
+    <p className="mt-1 text-sm text-slate-800" data-testid="acknowledgement">
+      Acknowledged <Time value={reorg.acknowledgedAt} />: {reorg.acknowledgement}
+    </p>
+  ) : (
+    <p className="mt-1 text-sm font-medium text-red-900" data-testid="acknowledgement">
+      Not acknowledged: the indexer will not restart until <code className="font-mono">ack-halt {reorg.id}</code> is run.
+    </p>
+  );
+}
+
 function Timeline({ reorgs }: { reorgs: Reorg[] }) {
   return (
     <ol className="relative ml-3 border-l-2 border-slate-400" aria-label="Reorgs, newest first">
@@ -34,6 +48,7 @@ function Timeline({ reorgs }: { reorgs: Reorg[] }) {
           <p className="mt-1 text-sm text-slate-800">
             {r.orphaned.length} orphaned → {r.canonical.length} canonical block{r.canonical.length === 1 ? "" : "s"}
           </p>
+          <Acknowledgement reorg={r} />
         </li>
       ))}
     </ol>
@@ -82,6 +97,7 @@ function Summary({ reorgs }: { reorgs: Reorg[] }) {
           <Th numeric>Ancestor block</Th>
           <Th numeric>Rollback from</Th>
           <Th numeric>Finalized block</Th>
+          <Th>Acknowledged</Th>
         </tr>
       </thead>
       <tbody>
@@ -97,6 +113,7 @@ function Summary({ reorgs }: { reorgs: Reorg[] }) {
             <Td numeric>{formatInt(r.ancestorBlock)}</Td>
             <Td numeric>{formatInt(r.rollbackFrom)}</Td>
             <Td numeric>{formatInt(r.finalizedBlock)}</Td>
+            <Td>{r.action === "halted" ? r.acknowledgedAt ? <Time value={r.acknowledgedAt} /> : "No" : "—"}</Td>
           </tr>
         ))}
       </tbody>

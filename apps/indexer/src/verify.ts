@@ -12,6 +12,8 @@ export interface IntegrityReport {
   firstBlock: number | null;
   lastBlock: number | null;
   counts: { ranges: number; blocks: number; logs: number; transfers: number; swaps: number; rejects: number };
+  /** Ranges whose rows retention deleted: the log and decoded count checks skip them, everything about blocks is still checked. */
+  purged: { landingRanges: number; decodedRanges: number };
   problems: IntegrityProblem[];
 }
 
@@ -44,12 +46,14 @@ const CHECKS: Record<string, string> = {
       ) as actual
       from ops.ranges r where r.chain_id = $1
     ) t where block_count <> actual`,
+  // Retention deletes a range's logs (landing_purged_at) and later its decoded rows (decoded_purged_at); the
+  // range row keeps the counts, but there is nothing left to compare them with, so purged parts are skipped.
   range_log_count: `
     select * from (
       select r.from_block, r.to_block, r.log_count, (
         select count(*) from chain.logs l where l.chain_id = r.chain_id and l.block_number between r.from_block and r.to_block
       ) as actual
-      from ops.ranges r where r.chain_id = $1
+      from ops.ranges r where r.chain_id = $1 and r.landing_purged_at is null
     ) t where log_count <> actual`,
   duplicate_log_position: `
     select block_number, log_index, count(*) as copies
@@ -64,17 +68,19 @@ const CHECKS: Record<string, string> = {
       select r.from_block, r.to_block, r.log_count, r.transfer_count, r.swap_count, r.reject_count,
         (select count(*) from chain.erc20_transfers t where t.chain_id = r.chain_id and t.block_number between r.from_block and r.to_block) as actual_transfers,
         (select count(*) from chain.uniswap_v3_swaps s where s.chain_id = r.chain_id and s.block_number between r.from_block and r.to_block) as actual_swaps
-      from ops.ranges r where r.chain_id = $1
+      from ops.ranges r where r.chain_id = $1 and r.decoded_purged_at is null
     ) t where transfer_count <> actual_transfers or swap_count <> actual_swaps
        or actual_transfers + actual_swaps + reject_count <> log_count`,
   transfer_without_log: `
     select t.block_number, t.log_index from chain.erc20_transfers t
     left join chain.logs l on l.chain_id = t.chain_id and l.block_hash = t.block_hash and l.log_index = t.log_index
-    where t.chain_id = $1 and l.log_index is null`,
+    where t.chain_id = $1 and l.log_index is null
+      and not exists (select 1 from ops.ranges r where r.chain_id = t.chain_id and r.landing_purged_at is not null and t.block_number between r.from_block and r.to_block)`,
   swap_without_log: `
     select s.block_number, s.log_index from chain.uniswap_v3_swaps s
     left join chain.logs l on l.chain_id = s.chain_id and l.block_hash = s.block_hash and l.log_index = s.log_index
-    where s.chain_id = $1 and l.log_index is null`,
+    where s.chain_id = $1 and l.log_index is null
+      and not exists (select 1 from ops.ranges r where r.chain_id = s.chain_id and r.landing_purged_at is not null and s.block_number between r.from_block and r.to_block)`,
   // A hash orphaned by a rollback must be gone. It may legitimately come back if the chain re-forked
   // onto it; then a range committed after the rollback covers it.
   orphaned_block_still_stored: `
@@ -92,8 +98,12 @@ const CHECKS: Record<string, string> = {
 export async function verifyIntegrity(database: Database, chainId: number): Promise<IntegrityReport> {
   const { sql } = database;
 
-  const [summary] = await sql<{ ranges: number; rejects: number; first_block: string | null; last_block: string | null }[]>`
-    select count(*)::int as ranges, coalesce(sum(reject_count), 0)::int as rejects, min(from_block) as first_block, max(to_block) as last_block
+  const [summary] = await sql<
+    { ranges: number; rejects: number; first_block: string | null; last_block: string | null; landing_purged: number; decoded_purged: number }[]
+  >`
+    select count(*)::int as ranges, coalesce(sum(reject_count), 0)::int as rejects, min(from_block) as first_block, max(to_block) as last_block,
+           (count(*) filter (where landing_purged_at is not null))::int as landing_purged,
+           (count(*) filter (where decoded_purged_at is not null))::int as decoded_purged
     from ops.ranges where chain_id = ${chainId}`;
   const [totals] = await sql<{ blocks: number; logs: number; transfers: number; swaps: number }[]>`
     select (select count(*) from chain.blocks where chain_id = ${chainId})::int as blocks,
@@ -125,6 +135,7 @@ export async function verifyIntegrity(database: Database, chainId: number): Prom
       swaps: totals?.swaps ?? 0,
       rejects: summary?.rejects ?? 0,
     },
+    purged: { landingRanges: summary?.landing_purged ?? 0, decodedRanges: summary?.decoded_purged ?? 0 },
     problems,
   };
 }

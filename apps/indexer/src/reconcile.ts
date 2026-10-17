@@ -147,6 +147,8 @@ export async function reconcileRanges(database: Database, provider: Provider, in
         eq(ranges.chainId, chainId),
         lte(ranges.toBlock, finalizedBlock),
         ne(ranges.status, "failed"),
+        // Nothing left to compare: the logs are gone.
+        isNull(ranges.landingPurgedAt),
         notExists(
           database.db
             .select({ one: sql`1` })
@@ -182,6 +184,13 @@ export async function reconcileRanges(database: Database, provider: Provider, in
       .select({ blockNumber: logs.blockNumber, blockHash: logs.blockHash, logIndex: logs.logIndex, txHash: logs.txHash })
       .from(logs)
       .where(and(eq(logs.chainId, chainId), between(logs.blockNumber, fromBlock, toBlock)));
+    // Read after the logs: a purge deletes them and sets this flag in one transaction, so a flag still unset
+    // means the logs above were whole, and a set flag means they may be missing and must not be compared.
+    const [flagged] = await database.db
+      .select({ purgedAt: ranges.landingPurgedAt })
+      .from(ranges)
+      .where(and(eq(ranges.chainId, chainId), eq(ranges.fromBlock, fromBlock)));
+    if (flagged?.purgedAt) continue;
     const blockHashes = new Map((await storedBlocks(database, chainId, fromBlock, toBlock)).map((b) => [b.number, b.hash]));
 
     const result = compareRange({

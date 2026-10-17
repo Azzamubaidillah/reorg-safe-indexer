@@ -1,0 +1,3 @@
+ALTER TABLE "ops"."ranges" ADD COLUMN "landing_purged_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "ops"."ranges" ADD COLUMN "decoded_purged_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "ops"."ranges" ADD CONSTRAINT "ranges_purge_check" CHECK (("ops"."ranges"."landing_purged_at" is null or "ops"."ranges"."status" = 'published') and ("ops"."ranges"."decoded_purged_at" is null or "ops"."ranges"."landing_purged_at" is not null));

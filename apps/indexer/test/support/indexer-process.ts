@@ -54,6 +54,8 @@ export function spawnIndexer(options: IndexerEnv): IndexerProcess {
     HEAD_POLL_INTERVAL_MS: String(options.headPollIntervalMs ?? 50),
     POLL_INTERVAL_MS: String(options.pollIntervalMs ?? 200),
     LOG_LEVEL: "info",
+    // The synthetic chains are dated 2020, so with the default 7 days every published range would be purged at once.
+    LANDING_RETENTION_DAYS: "100000",
     ...(options.endBlock === undefined ? {} : { END_BLOCK: String(options.endBlock) }),
     ...options.extraEnv,
   };

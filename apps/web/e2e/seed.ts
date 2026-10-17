@@ -18,6 +18,8 @@ import {
   FAILED_TO,
   FINALIZED_BLOCK,
   FIRST_BLOCK,
+  HALT_ACKNOWLEDGEMENT,
+  HALT_ACKNOWLEDGED_AT,
   HALTED_DETECTED_AT,
   HEAD_BLOCK,
   LAST_BLOCK,
@@ -33,6 +35,7 @@ import {
   REORG_ORPHANED,
   RPC_CALLS,
   RUN_ID,
+  UNACKED_HALT_DETECTED_AT,
 } from "./fixture.ts";
 
 const GATES = ["decode_rejects_zero", "counts_consistent", "blocks_linked", "log_positions_unique", "log_block_hash_matches", "value_bounds", "decoded_matches_landing"];
@@ -90,11 +93,14 @@ async function stageOutcomes({ sql }: Database): Promise<void> {
     insert into ops.backfill_jobs (id, chain_id, from_block, to_block, status, failure_reason, attempts, created_at, updated_at)
     values (${FAILED_JOB_ID}, ${CHAIN_ID}, ${FAILED_FROM}, ${FAILED_TO}, 'queued', ${FAILED_JOB_REASON}, 1, ${CHECKED_AT}, ${CHECKED_AT})`;
 
+  // Ids follow insert order: #1 unacknowledged halt, #2 acknowledged halt, #3 rollback (the newest, so the "last reorg").
+  const haltedBlocks = JSON.stringify([{ number: FIRST_BLOCK, hash: chain.header(FIRST_BLOCK).hash }]);
   await sql`
-    insert into ops.reorgs (chain_id, run_id, detected_at, action, ancestor_block, fork_block, depth, rollback_from, finalized_block, orphaned, canonical)
+    insert into ops.reorgs (chain_id, run_id, detected_at, action, ancestor_block, fork_block, depth, rollback_from, finalized_block, orphaned, canonical, acknowledged_at, acknowledgement)
     values
-      (${CHAIN_ID}, ${RUN_ID}, ${HALTED_DETECTED_AT}, 'halted', null, ${FIRST_BLOCK}, 1, null, ${FINALIZED_BLOCK}, ${JSON.stringify([{ number: FIRST_BLOCK, hash: chain.header(FIRST_BLOCK).hash }])}::jsonb, ${"[]"}::jsonb),
-      (${CHAIN_ID}, ${RUN_ID}, ${REORG_DETECTED_AT}, 'rolled_back', ${REORG_FORK - 1}, ${REORG_FORK}, ${REORG_DEPTH}, ${REORG_FORK}, ${FINALIZED_BLOCK}, ${JSON.stringify(REORG_ORPHANED)}::jsonb, ${JSON.stringify(REORG_CANONICAL)}::jsonb)`;
+      (${CHAIN_ID}, ${RUN_ID}, ${UNACKED_HALT_DETECTED_AT}, 'halted', null, ${FIRST_BLOCK}, 1, null, ${FINALIZED_BLOCK}, ${haltedBlocks}::jsonb, ${"[]"}::jsonb, null, null),
+      (${CHAIN_ID}, ${RUN_ID}, ${HALTED_DETECTED_AT}, 'halted', null, ${FIRST_BLOCK}, 1, null, ${FINALIZED_BLOCK}, ${haltedBlocks}::jsonb, ${"[]"}::jsonb, ${HALT_ACKNOWLEDGED_AT}, ${HALT_ACKNOWLEDGEMENT}),
+      (${CHAIN_ID}, ${RUN_ID}, ${REORG_DETECTED_AT}, 'rolled_back', ${REORG_FORK - 1}, ${REORG_FORK}, ${REORG_DEPTH}, ${REORG_FORK}, ${FINALIZED_BLOCK}, ${JSON.stringify(REORG_ORPHANED)}::jsonb, ${JSON.stringify(REORG_CANONICAL)}::jsonb, null, null)`;
 
   const { explained, unexplained } = RECONCILIATIONS;
   // Cast explicitly: postgres.js cannot bind a JS array as a jsonb parameter without it.

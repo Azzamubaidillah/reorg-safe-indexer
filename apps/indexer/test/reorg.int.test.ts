@@ -263,6 +263,109 @@ describe("fork below finalized", () => {
   });
 });
 
+describe("a halt stays in force until it is acknowledged", () => {
+  /** Docker restarts a failed container whatever its exit code; each `run` here stands for one such restart. */
+  async function restart(): Promise<number | null> {
+    await startIndexer();
+    return (await exitWithin(indexer, 30_000)).code;
+  }
+
+  async function cli(...args: string[]): Promise<{ code: number | null; stdout: string }> {
+    await waitForLockRelease();
+    const proc = spawnIndexer({ rpcUrl: rpc.url, maxSpan: RANGE_SIZE, startBlock: START, rangeSize: RANGE_SIZE, args });
+    const { code } = await exitWithin(proc, 60_000);
+    return { code, stdout: proc.stdout() };
+  }
+
+  const reorgRows = () => database.sql<{ id: string; action: string; acknowledged: boolean; acknowledgement: string | null }[]>`
+    select id, action, acknowledged_at is not null as acknowledged, acknowledgement from ops.reorgs order by id`;
+  const failedRuns = () => database.sql<{ failure_reason: string }[]>`select failure_reason from ops.runs where status = 'failed' order by started_at, id`;
+
+  /** Follows the original chain to HEAD, then forks it below finalized: the first run halts and exits 2. */
+  async function haltOnFork(): Promise<SyntheticChain> {
+    await follow(HEAD, 1050);
+    const fork = original.fork(1050, "deep");
+    rpc.setChain(fork);
+    rpc.setHead(HEAD + 5);
+    expect((await exitWithin(indexer, 30_000)).code, indexer.output()).toBe(2);
+    return fork;
+  }
+
+  it("makes a restart exit 2 without a single RPC call, recording one failed run and alerting", async () => {
+    await haltOnFork();
+    const [halt] = await reorgRows();
+    const before = { calls: { ...rpc.calls }, data: await contentFingerprints(database) };
+
+    expect(await restart()).toBe(2);
+
+    expect(rpc.calls).toEqual(before.calls);
+    expect(await contentFingerprints(database)).toEqual(before.data);
+    const reason = `halted: unacknowledged reorg #${halt!.id}`;
+    expect((await failedRuns()).map((r) => r.failure_reason)).toEqual([expect.stringMatching(/^reorg below finalized/), reason]);
+    expect(indexer.logs().find((l) => l.level === 60)).toMatchObject({ reorgId: Number(halt!.id), msg: expect.stringContaining(`${reason}; after checking the cause run: ack-halt ${halt!.id}`) });
+    expect(indexer.logs().find((l) => l.alert === "halt-unacknowledged")).toBeDefined();
+    // Still nothing running and nothing new recorded as a reorg.
+    expect(await reorgRows()).toHaveLength(1);
+    expect(await database.sql`select 1 from ops.runs where status = 'running'`).toHaveLength(0);
+  });
+
+  it("lets the run proceed after ack-halt and halts again, as a new unacknowledged row, when the fork is still there", async () => {
+    await haltOnFork();
+    const [first] = await reorgRows();
+
+    const ack = await cli("ack-halt", first!.id, "fork", "is", "real,", "checked", "elsewhere");
+    expect(ack.code).toBe(0);
+    expect(JSON.parse(ack.stdout)).toEqual({ id: Number(first!.id), acknowledged: true });
+    const callsBefore = Object.values(rpc.calls).reduce((sum, n) => sum + n, 0);
+
+    // The provider still serves the fork below finalized: the run gets past startup, talks to it, and halts again.
+    expect(await restart()).toBe(2);
+
+    expect(Object.values(rpc.calls).reduce((sum, n) => sum + n, 0)).toBeGreaterThan(callsBefore);
+    expect(await reorgRows()).toEqual([
+      { id: first!.id, action: "halted", acknowledged: true, acknowledgement: "fork is real, checked elsewhere" },
+      { id: String(Number(first!.id) + 1), action: "halted", acknowledged: false, acknowledgement: null },
+    ]);
+    // The new halt blocks in turn, with its own id, and does not touch the RPC.
+    const callsAfterSecondHalt = { ...rpc.calls };
+    expect(await restart()).toBe(2);
+    expect(rpc.calls).toEqual(callsAfterSecondHalt);
+    expect((await failedRuns()).at(-1)?.failure_reason).toBe(`halted: unacknowledged reorg #${Number(first!.id) + 1}`);
+  });
+
+  it("resumes ingesting after the acknowledgement once the provider serves the stored chain again", async () => {
+    await haltOnFork();
+    const [halt] = await reorgRows();
+    expect((await cli("ack-halt", halt!.id, "provider", "healed")).code).toBe(0);
+
+    // The operator's fix: the provider is back on the chain that is stored.
+    rpc.setChain(original);
+    rpc.setHead(HEAD + 5);
+    await startIndexer();
+    await until(`committed to ${HEAD + 5}`, async () => (await committedTo()) === HEAD + 5);
+    await stopIndexer();
+
+    await expectStoredChain(database, original, START, HEAD + 5);
+    expect((await verifyIntegrity(database, CHAIN_ID)).ok).toBe(true);
+    expect(await reorgRows()).toHaveLength(1);
+  });
+
+  it("ack-halt refuses bad usage, unknown ids and halts that are already acknowledged", async () => {
+    await haltOnFork();
+    const [halt] = await reorgRows();
+
+    for (const args of [[], ["abc", "text"], ["0", "text"], [halt!.id], [halt!.id, "   "]]) {
+      expect((await cli("ack-halt", ...args)).code, JSON.stringify(args)).toBe(2);
+    }
+    expect((await cli("ack-halt", "999999", "why")).code).toBe(1);
+    expect(await reorgRows()).toEqual([{ id: halt!.id, action: "halted", acknowledged: false, acknowledgement: null }]);
+
+    expect((await cli("ack-halt", halt!.id, "why")).code).toBe(0);
+    expect((await cli("ack-halt", halt!.id, "again")).code).toBe(1);
+    expect((await reorgRows())[0]?.acknowledgement).toBe("why");
+  });
+});
+
 describe("reorg while ranges are in flight", () => {
   it("re-fetches ranges whose logs come from the old chain while headers are already new, then converges", async () => {
     await follow(HEAD, 1020);

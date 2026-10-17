@@ -1,4 +1,4 @@
-import { and, asc, between, eq, gt, gte, sql } from "drizzle-orm";
+import { and, asc, between, eq, gt, gte, isNull, sql } from "drizzle-orm";
 import { blocks, erc20Transfers, logs, ranges, reorgs, runs, uniswapV3Swaps, type Database } from "@rsi/db";
 import type { BlockRef, DecodedRange, FetchedRange, Hex } from "./types.ts";
 
@@ -193,6 +193,47 @@ export async function rollbackTo(database: Database, input: RollbackInput): Prom
 /** Audit row for a reorg the indexer refuses to repair; deletes nothing. */
 export async function recordHalt(database: Database, input: ReorgRecord): Promise<void> {
   await database.db.insert(reorgs).values({ ...input, action: "halted", ancestorBlock: null, rollbackFrom: null });
+}
+
+export interface UnacknowledgedHalt {
+  id: number;
+  forkBlock: number;
+  finalizedBlock: number;
+  detectedAt: Date;
+}
+
+/**
+ * The oldest halt of the chain that nobody has acknowledged. A restart (Docker's `on-failure` cannot exclude exit
+ * code 2) would otherwise re-detect the same fork against the same provider and halt again, so `run` refuses to
+ * start while this exists.
+ */
+export async function unacknowledgedHalt(database: Database, chainId: number): Promise<UnacknowledgedHalt | undefined> {
+  const [row] = await database.db
+    .select({ id: reorgs.id, forkBlock: reorgs.forkBlock, finalizedBlock: reorgs.finalizedBlock, detectedAt: reorgs.detectedAt })
+    .from(reorgs)
+    .where(and(eq(reorgs.chainId, chainId), eq(reorgs.action, "halted"), isNull(reorgs.acknowledgedAt)))
+    .orderBy(asc(reorgs.id))
+    .limit(1);
+  return row;
+}
+
+/** Records that the operator looked at a halt and judged it safe to continue; `text` says why. Throws when there is nothing to acknowledge. */
+export async function acknowledgeHalt(database: Database, chainId: number, id: number, text: string): Promise<void> {
+  const note = text.trim();
+  if (note === "") throw new Error("acknowledgement must not be empty");
+  const updated = await database.db
+    .update(reorgs)
+    .set({ acknowledgedAt: sql`now()`, acknowledgement: note })
+    .where(and(eq(reorgs.id, id), eq(reorgs.chainId, chainId), eq(reorgs.action, "halted"), isNull(reorgs.acknowledgedAt)))
+    .returning({ id: reorgs.id });
+  if (updated.length > 0) return;
+
+  const [row] = await database.db
+    .select({ action: reorgs.action, acknowledgedAt: reorgs.acknowledgedAt })
+    .from(reorgs)
+    .where(and(eq(reorgs.id, id), eq(reorgs.chainId, chainId)));
+  if (!row) throw new Error(`no reorg ${id} on chain ${chainId}`);
+  throw new Error(row.action === "halted" ? `halt ${id} is already acknowledged` : `reorg ${id} was ${row.action}, only halts need an acknowledgement`);
 }
 
 export async function startRun(database: Database, runId: string, chainId: number): Promise<void> {

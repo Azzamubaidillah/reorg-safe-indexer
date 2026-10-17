@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { RetentionPolicy } from "./retention.ts";
 
 const address = z
   .string()
@@ -38,7 +39,20 @@ const jsonOf = (name: string) =>
     }
   });
 
-const envSchema = z.object({
+const DAY_MS = 86_400_000;
+
+const retentionEnv = z.object({
+  /** Days `chain.logs` of a published range stay after its last block. */
+  LANDING_RETENTION_DAYS: z.coerce.number().positive().default(7),
+  /** Days decoded rows stay; unset keeps them forever. Needs ANALYTICS_MANIFEST_PATH. */
+  DECODED_RETENTION_DAYS: z.coerce.number().positive().optional(),
+  /** `_manifest.json` of the Parquet store, proof that decoded rows were exported before they are deleted. */
+  ANALYTICS_MANIFEST_PATH: z.string().min(1).optional(),
+  RETENTION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
+  RETENTION_MAX_RANGES: z.coerce.number().int().positive().default(500),
+});
+
+const envSchema = retentionEnv.extend({
   DATABASE_URL: z.string().min(1),
   CHAIN_ID: z.coerce.number().int().positive().default(1),
   RPC_PROVIDERS: jsonOf("RPC_PROVIDERS").pipe(z.array(providerSchema).min(1)),
@@ -91,7 +105,30 @@ export interface Config {
   metricsHost: string;
   healthStaleAfterMs: number;
   lagSampleIntervalMs: number;
+  retention: RetentionPolicy;
+  retentionIntervalMs: number;
 }
+
+export type RetentionConfig = Pick<Config, "retention" | "retentionIntervalMs">;
+
+function retentionConfig(e: z.infer<typeof retentionEnv>): RetentionConfig {
+  // Without a manifest the purge could never prove an export, so decoded rows would silently stay forever.
+  if (e.DECODED_RETENTION_DAYS !== undefined && e.ANALYTICS_MANIFEST_PATH === undefined) {
+    throw new Error("DECODED_RETENTION_DAYS needs ANALYTICS_MANIFEST_PATH: decoded rows are only deleted once the Parquet export is proven");
+  }
+  return {
+    retention: {
+      landingRetentionMs: e.LANDING_RETENTION_DAYS * DAY_MS,
+      decodedRetentionMs: e.DECODED_RETENTION_DAYS === undefined ? undefined : e.DECODED_RETENTION_DAYS * DAY_MS,
+      analyticsManifestPath: e.ANALYTICS_MANIFEST_PATH,
+      maxRanges: e.RETENTION_MAX_RANGES,
+    },
+    retentionIntervalMs: e.RETENTION_INTERVAL_MS,
+  };
+}
+
+/** The retention settings alone, for commands that need no RPC providers. */
+export const loadRetentionConfig = (env: NodeJS.ProcessEnv = process.env): RetentionConfig => retentionConfig(retentionEnv.parse(env));
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const e = envSchema.parse(env);
@@ -126,5 +163,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     metricsHost: e.METRICS_HOST,
     healthStaleAfterMs: e.HEALTH_STALE_AFTER_MS,
     lagSampleIntervalMs: e.LAG_SAMPLE_INTERVAL_MS,
+    ...retentionConfig(e),
   };
 }

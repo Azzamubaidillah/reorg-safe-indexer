@@ -21,7 +21,7 @@ import { ZodError } from "zod";
 import { listSwaps, listTransfers } from "./events.ts";
 import { HttpError, parseInput } from "./http.ts";
 import { getRangeDetail, listBackfillJobs, listRanges, listReconciliations, listReorgs } from "./ops.ts";
-import { buildStatus } from "./status.ts";
+import { buildStatus, type RetentionDays } from "./status.ts";
 
 /** What the API needs from `@rsi/analytics`' AnalyticsReader; a structural type so tests can fake it. */
 export interface AnalyticsSource {
@@ -39,6 +39,8 @@ export interface AppInput {
   /** Pino-compatible logger options for Fastify; off by default so tests stay quiet. */
   logger?: boolean | { level: string };
   now?: () => number;
+  /** Configured retention, shown by /v1/status; omitted values are reported as unknown. */
+  retentionDays?: RetentionDays;
 }
 
 const errorBody = (code: string, message: string): ApiError => ({ error: { code, message } });
@@ -68,7 +70,7 @@ export async function buildApp(input: AppInput): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  app.get("/v1/status", async () => buildStatus(database, chainId, now()));
+  app.get("/v1/status", async () => buildStatus(database, chainId, now(), input.retentionDays ?? {}));
 
   app.get("/v1/reorgs", async (req) => listReorgs(database, chainId, parseInput(PageQuery, req.query)));
 

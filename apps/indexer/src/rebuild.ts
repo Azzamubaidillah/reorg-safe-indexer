@@ -31,8 +31,10 @@ export interface RebuildReport {
   chainId: number;
   logsScanned: number;
   tables: RebuildTableReport[];
-  /** Logs the decoder rejected when rebuilding, against the sum of `ops.ranges.reject_count`. */
+  /** Logs the decoder rejected when rebuilding, against the sum of `ops.ranges.reject_count` of the ranges covered. */
   rejects: { rebuilt: number; recorded: number };
+  /** Ranges left out because retention deleted their landing logs: nothing to rebuild from. Their decoded rows are not compared either. */
+  skippedRanges: number;
   /** Every table equal and the reject counts agree. */
   equal: boolean;
 }
@@ -77,13 +79,17 @@ interface LogRow {
 /** Order that makes a table's hash independent of physical layout; block_hash only breaks ties on broken data. */
 const ORDER = "order by block_number, log_index, block_hash";
 
+/** Decoded rows whose landing logs were purged cannot be rebuilt; they are excluded from both sides of the comparison. */
+const REBUILDABLE =
+  "and not exists (select 1 from ops.ranges r where r.chain_id = t.chain_id and r.landing_purged_at is not null and t.block_number between r.from_block and r.to_block)";
+
 /** Both sides are hashed from the same column list and text encoding, so equal content means equal hash. */
 const canonical = (columns: string[]) => `concat_ws('|', ${columns.join(", ")})`;
 
 async function digest(tx: Tx, table: string, columns: string[], chainId: number, batchSize: number): Promise<{ rows: number; sha256: string }> {
   const hash = createHash("sha256");
   let rows = 0;
-  const cursor = tx.unsafe<{ row: string }[]>(`select ${canonical(columns)} as row from ${table} where chain_id = $1 ${ORDER}`, [chainId]).cursor(batchSize);
+  const cursor = tx.unsafe<{ row: string }[]>(`select ${canonical(columns)} as row from ${table} t where t.chain_id = $1 ${REBUILDABLE} ${ORDER}`, [chainId]).cursor(batchSize);
   for await (const batch of cursor) {
     for (const { row } of batch) hash.update(`${row}\n`);
     rows += batch.length;
@@ -92,7 +98,7 @@ async function digest(tx: Tx, table: string, columns: string[], chainId: number,
 }
 
 async function firstDifferences(tx: Tx, spec: (typeof TABLES)[RebuiltTable], chainId: number): Promise<RebuildDifference[]> {
-  const side = (table: string) => `select block_number, log_index, ${canonical(spec.columns)} as enc from ${table} where chain_id = $1`;
+  const side = (table: string) => `select block_number, log_index, ${canonical(spec.columns)} as enc from ${table} t where t.chain_id = $1 ${REBUILDABLE}`;
   const rows = await tx.unsafe<{ block_number: string; log_index: number; kind: RebuildDifference["kind"] }[]>(
     `with r as (${side(spec.rebuilt)}), s as (${side(spec.stored)})
      select coalesce(r.block_number, s.block_number) as block_number, coalesce(r.log_index, s.log_index) as log_index,
@@ -197,13 +203,17 @@ export async function verifyRebuild(database: Database, input: RebuildInput): Pr
       });
     }
 
-    const [recorded] = await tx<{ n: number }[]>`select coalesce(sum(reject_count), 0)::int as n from ops.ranges where chain_id = ${chainId}`;
+    const [recorded] = await tx<{ n: number; skipped: number }[]>`
+      select (coalesce(sum(reject_count) filter (where landing_purged_at is null), 0))::int as n,
+             (count(*) filter (where landing_purged_at is not null))::int as skipped
+      from ops.ranges where chain_id = ${chainId}`;
     const recordedRejects = recorded?.n ?? 0;
     return {
       chainId,
       logsScanned,
       tables,
       rejects: { rebuilt: rebuiltRejects, recorded: recordedRejects },
+      skippedRanges: recorded?.skipped ?? 0,
       equal: tables.every((t) => t.equal) && rebuiltRejects === recordedRejects,
     };
   });

@@ -37,7 +37,11 @@ const fork = chain.fork(REORG_FORK, "e2e-fork");
 const heights = Array.from({ length: REORG_DEPTH }, (_, i) => REORG_FORK + i);
 export const REORG_ORPHANED = heights.map((number) => ({ number, hash: chain.header(number).hash }));
 export const REORG_CANONICAL = heights.map((number) => ({ number, hash: fork.header(number).hash }));
+/** Two halts: #1 still blocks the indexer's restart, #2 was acknowledged by the operator; #3 is the rollback above. */
+export const UNACKED_HALT_DETECTED_AT = "2026-09-20T08:30:00.000Z";
 export const HALTED_DETECTED_AT = "2026-10-01T08:30:00.000Z";
+export const HALT_ACKNOWLEDGED_AT = "2026-10-01T09:15:00.000Z";
+export const HALT_ACKNOWLEDGEMENT = "Provider rolled back inside finality; two other providers agree with the stored chain.";
 
 export const RECONCILIATIONS = {
   matchCount: 2,

@@ -421,6 +421,9 @@ export async function runQualityCycle(database: Database, pool: RpcPool, input: 
   const { chainId, finalizedBlock, contracts } = input;
   const summary: QualityCycleSummary = { published: [], failed: [], backfills: [] };
 
+  // Gates read the landing and decoded rows, which retention deletes, but only for published ranges
+  // (ops.ranges check `ranges_purge_check`): candidates and failed ranges are always whole, so no purged
+  // range is ever re-gated or backfilled.
   const candidates = await database.db
     .select()
     .from(ranges)

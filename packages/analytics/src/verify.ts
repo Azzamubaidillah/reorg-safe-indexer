@@ -3,7 +3,7 @@ import type { Database } from "@rsi/db";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { exportSnapshot, SNAPSHOT } from "./export.ts";
-import { dayBounds, isCovered, KINDS, partitionPath, readManifest, sha256FileIfExists, type DayEntry, type Kind, type Manifest } from "./layout.ts";
+import { dayBounds, isCovered, KINDS, mergeIntervals, partitionPath, readManifest, sha256FileIfExists, type DayEntry, type Kind, type Manifest } from "./layout.ts";
 import { DEFAULT_METADATA, sqrtPriceToPrice, type AnalyticsMetadata } from "./metadata.ts";
 import { countPublished, publishedInDay, type DayWindow, type Tx } from "./published.ts";
 import { AnalyticsReader } from "./reader.ts";
@@ -25,6 +25,8 @@ export interface AnalyticsCheck {
 
 export interface AnalyticsVerifyReport {
   ok: boolean;
+  /** Days with decoded rows purged from Postgres (retention): the Parquet files are then the only copy, so Postgres-based checks skip them. */
+  purgedDays: string[];
   sampledDays: string[];
   checks: AnalyticsCheck[];
 }
@@ -45,6 +47,8 @@ function result(name: string, problems: string[], summary: string): AnalyticsChe
  *  - `row-counts`: published rows in Postgres equal rows in Parquet (independent of any day window);
  *  - `aggregates:<day>`: for sampled days, DuckDB answers (through `AnalyticsReader`) equal SQL run on the chain tables;
  *  - `rebuild`: re-exporting from Postgres into a scratch directory reproduces every partition's content hash.
+ * The last three compare with Postgres, so they only cover days still fully retained there. A day any of whose
+ * ranges had its decoded rows purged is reported in `purgedDays` and skipped (its files are checked by `files` only).
  * The scratch copy is deleted afterwards. Run it while the indexer is idle or accept that ranges published
  * mid-run show up as failures of the next export, not as corruption.
  */
@@ -59,18 +63,21 @@ export async function verifyAnalytics(database: Database, options: VerifyOptions
       const problem = manifest ? `store holds chain ${manifest.chainId}` : published.length > 0 ? `${published.length} published ranges but no manifest` : "";
       // An empty store is correct only while nothing is published.
       checks.push(result("manifest", problem ? [problem] : [], "no manifest, nothing published"));
-      return { ok: checks.every((c) => c.passed), sampledDays: [], checks };
+      return { ok: checks.every((c) => c.passed), purgedDays: [], sampledDays: [], checks };
     }
     checks.push(result("manifest", [], `chain ${manifest.chainId}, ${Object.keys(manifest.days).length} days, through block ${manifest.exportedThroughBlock}`));
 
     const missing = published.filter((r) => !isCovered(manifest.exported, Number(r.from), Number(r.to)));
     checks.push(result("coverage", missing.length > 0 ? [`${missing.length} published ranges not exported, first from block ${missing[0]?.from}`] : [], `${published.length} published ranges exported`));
 
+    const purgedDays = await daysWithPurgedRows(tx, options.chainId, manifest);
+    const retainedDays = Object.keys(manifest.days).filter((day) => !purgedDays.has(day));
+
     const liveHashes = await hashLive(options.dir, manifest);
     checks.push(await checkFiles(options.dir, manifest, liveHashes));
-    checks.push(await checkRowCounts(tx, options.chainId, manifest));
+    checks.push(await checkRowCounts(tx, options.chainId, manifest, purgedDays));
 
-    const sampledDays = sampleEvenly(Object.keys(manifest.days).sort(), options.sampleDays);
+    const sampledDays = sampleEvenly(retainedDays.sort(), options.sampleDays);
     const reader = new AnalyticsReader({ dir: options.dir, metadata: options.metadata ?? DEFAULT_METADATA });
     try {
       for (const day of sampledDays) {
@@ -81,12 +88,22 @@ export async function verifyAnalytics(database: Database, options: VerifyOptions
       await reader.close();
     }
 
-    checks.push(await checkRebuild(tx, options, liveHashes));
-    return { ok: checks.every((c) => c.passed), sampledDays, checks };
+    checks.push(await checkRebuild(tx, options, liveHashes, purgedDays));
+    return { ok: checks.every((c) => c.passed), purgedDays: [...purgedDays].sort(), sampledDays, checks };
   });
 }
 
 const key = (kind: Kind, day: string) => `${kind}/${day}`;
+const dayOf = (name: string) => name.slice(name.indexOf("/") + 1);
+
+/** Manifest days that share a block with a range whose decoded rows retention deleted (a day is a contiguous block span). */
+async function daysWithPurgedRows(sql: Tx, chainId: number, manifest: Manifest): Promise<Set<string>> {
+  const purged = await sql<{ from: string; to: string }[]>`
+    select from_block::text as "from", to_block::text as "to" from ops.ranges where chain_id = ${chainId} and decoded_purged_at is not null`;
+  const intervals = mergeIntervals(purged.map((r): [number, number] => [Number(r.from), Number(r.to)]));
+  const days = Object.entries(manifest.days).filter(([, entry]) => intervals.some(([from, to]) => from <= entry.maxBlock && entry.minBlock <= to));
+  return new Set(days.map(([day]) => day));
+}
 
 /** What is actually on disk, keyed `kind/day`: null for a manifest entry whose file is gone. */
 async function hashLive(dir: string, manifest: Manifest): Promise<Map<string, string | null>> {
@@ -127,12 +144,19 @@ async function checkFiles(dir: string, manifest: Manifest, liveHashes: Map<strin
   return result("files", problems, `${liveHashes.size} partitions match the manifest`);
 }
 
-async function checkRowCounts(sql: Tx, chainId: number, manifest: Manifest): Promise<AnalyticsCheck> {
+/** Purged days are left out on both sides: Postgres no longer holds their rows. */
+async function checkRowCounts(sql: Tx, chainId: number, manifest: Manifest, purgedDays: Set<string>): Promise<AnalyticsCheck> {
   const problems: string[] = [];
   const parts: string[] = [];
+  const excluded = mergeIntervals(
+    [...purgedDays].map((day): [number, number] => {
+      const { minBlock, maxBlock } = manifest.days[day] as DayEntry;
+      return [minBlock, maxBlock];
+    }),
+  );
   for (const kind of KINDS) {
-    const postgres = await countPublished(sql, chainId, kind);
-    const parquet = Object.values(manifest.days).reduce((sum, entry) => sum + (entry[kind]?.rows ?? 0), 0);
+    const postgres = await countPublished(sql, chainId, kind, excluded);
+    const parquet = Object.entries(manifest.days).reduce((sum, [day, entry]) => sum + (purgedDays.has(day) ? 0 : (entry[kind]?.rows ?? 0)), 0);
     parts.push(`${kind} ${parquet}`);
     if (postgres !== parquet) problems.push(`${kind}: postgres ${postgres}, parquet ${parquet}`);
   }
@@ -189,21 +213,24 @@ async function checkDay(sql: Tx, reader: AnalyticsReader, options: VerifyOptions
   return result(`aggregates:${day}`, problems, `${tokenRows.length} tokens, ${poolRows.length} pools match`);
 }
 
-async function checkRebuild(sql: Tx, options: VerifyOptions, liveHashes: Map<string, string | null>): Promise<AnalyticsCheck> {
+async function checkRebuild(sql: Tx, options: VerifyOptions, liveHashes: Map<string, string | null>, purgedDays: Set<string>): Promise<AnalyticsCheck> {
   // Next to the live store, not in /tmp: it is as large as the store and must be on a volume that can hold it.
   const scratch = await mkdtemp(join(dirname(resolve(options.dir)), ".analytics-verify-"));
   try {
-    await exportSnapshot(sql, { chainId: options.chainId, dir: scratch });
+    await exportSnapshot(sql, { chainId: options.chainId, dir: scratch, rebuildPurgedDays: true });
     const rebuilt = await readManifest(scratch);
     const problems: string[] = [];
+    // A purged day rebuilds from what is left of it in Postgres, which is not the file's content: not comparable.
     const fresh = new Map<string, string>();
-    for (const [day, entry] of Object.entries(rebuilt?.days ?? {})) for (const kind of KINDS) if (entry[kind]) fresh.set(key(kind, day), entry[kind].sha256);
+    for (const [day, entry] of Object.entries(rebuilt?.days ?? {})) {
+      if (!purgedDays.has(day)) for (const kind of KINDS) if (entry[kind]) fresh.set(key(kind, day), entry[kind].sha256);
+    }
     for (const [name, hash] of fresh) {
       if (!liveHashes.has(name)) problems.push(`${name} missing from live store`);
       else if (liveHashes.get(name) !== hash) problems.push(`${name} differs from a rebuild`);
     }
-    for (const name of liveHashes.keys()) if (!fresh.has(name)) problems.push(`${name} is not in a rebuild`);
-    return result("rebuild", problems, `${fresh.size} partitions identical to a rebuild from Postgres`);
+    for (const name of liveHashes.keys()) if (!fresh.has(name) && !purgedDays.has(dayOf(name))) problems.push(`${name} is not in a rebuild`);
+    return result("rebuild", problems, `${fresh.size} partitions identical to a rebuild from Postgres${purgedDays.size > 0 ? ` (${purgedDays.size} purged days skipped)` : ""}`);
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

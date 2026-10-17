@@ -93,6 +93,11 @@ export class Alerter {
     return this.alert("halt", `HALT chain ${info.chainId}: reorg at or below finalized block ${info.finalizedBlock} (fork at ${info.forkBlock} or lower); indexer stopped`);
   }
 
+  /** `run` was started while a halt is unacknowledged and exited again without doing anything. */
+  haltUnacknowledged(info: { chainId: number; reorgId: number }): Promise<void> {
+    return this.alert("halt-unacknowledged", `Indexer for chain ${info.chainId} refuses to start: reorg #${info.reorgId} halted it and has not been acknowledged (ack-halt ${info.reorgId} <why it is safe>)`);
+  }
+
   gateFailure(info: GateFailureAlert): Promise<void> {
     const detail = info.detail ? `: ${info.detail}` : "";
     return this.alert(`gate:${info.gate}`, `Quality gate "${info.gate}" failed for blocks ${info.fromBlock}-${info.toBlock}${detail}`);

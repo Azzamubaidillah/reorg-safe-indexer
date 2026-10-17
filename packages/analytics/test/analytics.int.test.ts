@@ -1,6 +1,6 @@
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { Database } from "@rsi/db";
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -46,6 +46,22 @@ async function duck(sql: string): Promise<Record<string, unknown>[]> {
     connection.closeSync();
     instance.closeSync();
   }
+}
+
+/** What retention leaves behind for the range starting at `from`: no decoded rows, both flags set. */
+async function purgeDecoded(from: number, to: number): Promise<void> {
+  await database.sql`delete from chain.erc20_transfers where block_number between ${from} and ${to}`;
+  await database.sql`delete from chain.uniswap_v3_swaps where block_number between ${from} and ${to}`;
+  await database.sql`update ops.ranges set landing_purged_at = now(), decoded_purged_at = now() where from_block = ${from}`;
+}
+
+/** Content hash of every file under the store (manifest included), keyed by relative path: byte-identical means equal maps. */
+async function storeHashes(): Promise<Record<string, string>> {
+  const hashes: Record<string, string> = {};
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) hashes[join(entry.parentPath, entry.name).slice(dir.length)] = await sha256File(join(entry.parentPath, entry.name));
+  }
+  return hashes;
 }
 
 const sumOf = async (query: string): Promise<bigint> => BigInt(String((await database.sql.unsafe<{ v: string }[]>(query))[0]?.v));
@@ -229,6 +245,63 @@ describe("poolOhlc", () => {
   });
 });
 
+describe("exportPublished and decoded purges", () => {
+  // Blocks 1100-1119 are on a third UTC day (1096-1143), after the days the other ranges touch.
+  const LATER: RangeSpec = [1100, 1119, "published"];
+
+  it("refuses to rewrite a purged day when the manifest is gone, naming the day and leaving every file untouched", async () => {
+    await seedRanges(database.sql, [R1, R2, R3]);
+    await exportPublished(database, { chainId: CHAIN_ID, dir });
+    await purgeDecoded(R1[0], R1[1]);
+    await rm(join(dir, "_manifest.json"));
+    const before = await storeHashes();
+
+    await expect(exportPublished(database, { chainId: CHAIN_ID, dir })).rejects.toThrow(/refusing to export: day\(s\) 2024-01-01/);
+
+    expect(await storeHashes()).toEqual(before);
+    expect(await readManifest(dir)).toBeNull();
+    expect((await readdir(dir)).filter((name) => name.startsWith(".duckdb-"))).toEqual([]);
+  });
+
+  it("refuses a pending range that lands in a purged day, and writes nothing, not even the other pending days", async () => {
+    await seedRanges(database.sql, [R1, R2]);
+    await exportPublished(database, { chainId: CHAIN_ID, dir });
+    await purgeDecoded(R1[0], R1[1]);
+    // R3 reaches into day 1 (blocks 1040-1047); LATER is a clean third day.
+    await seedRanges(database.sql, [R3, LATER]);
+    const before = await storeHashes();
+
+    await expect(exportPublished(database, { chainId: CHAIN_ID, dir })).rejects.toThrow(/day\(s\) 2024-01-01 contain ranges/);
+
+    expect(await storeHashes()).toEqual(before);
+    expect((await readManifest(dir))?.exported).toEqual([[1000, 1039]]);
+  });
+
+  it("still exports later days incrementally while earlier days are purged and already in the manifest", async () => {
+    await seedRanges(database.sql, [R1, R2, R3]);
+    await exportPublished(database, { chainId: CHAIN_ID, dir });
+    await purgeDecoded(R1[0], R1[1]);
+    await purgeDecoded(R2[0], R2[1]);
+    await purgeDecoded(R3[0], R3[1]);
+    const before = await storeHashes();
+    await seedRanges(database.sql, [LATER]);
+
+    const summary = await exportPublished(database, { chainId: CHAIN_ID, dir });
+
+    expect(summary.newRanges).toBe(1);
+    expect(summary.partitions.map((p) => [p.kind, p.day])).toEqual([["transfers", "2024-01-03"], ["swaps", "2024-01-03"]]);
+    expect((await readManifest(dir))?.exported).toEqual([[1000, 1059], [1100, 1119]]);
+    // The purged days' files are exactly as before; the only changes are the new day and the manifest.
+    const after = await storeHashes();
+    for (const [path, hash] of Object.entries(before)) {
+      if (!path.endsWith("_manifest.json")) expect(after[path], path).toBe(hash);
+    }
+    expect(Object.keys(after).filter((path) => !(path in before) && !path.includes("2024-01-03"))).toEqual([]);
+    const report = await verifyAnalytics(database, { chainId: CHAIN_ID, dir, sampleDays: 5 });
+    expect(report).toMatchObject({ ok: true, purgedDays: [DAY1, DAY2], sampledDays: ["2024-01-03"] });
+  });
+});
+
 describe("verifyAnalytics", () => {
   const verify = () => verifyAnalytics(database, { chainId: CHAIN_ID, dir, sampleDays: 5 });
   const failed = (report: Awaited<ReturnType<typeof verify>>) => report.checks.filter((c) => !c.passed).map((c) => c.name);
@@ -240,6 +313,47 @@ describe("verifyAnalytics", () => {
     expect(failed(report)).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.checks.map((c) => c.name)).toEqual(["manifest", "coverage", "files", "row-counts", `aggregates:${DAY1}`, `aggregates:${DAY2}`, "rebuild"]);
+  });
+
+  describe("after retention purged decoded rows", () => {
+    it("compares only the days still fully in Postgres and reports the purged day", async () => {
+      await seedRanges(database.sql, [R1, R2, R3]);
+      await exportPublished(database, { chainId: CHAIN_ID, dir });
+      await purgeDecoded(R1[0], R1[1]);
+
+      const report = await verify();
+
+      expect(failed(report)).toEqual([]);
+      expect(report).toMatchObject({ ok: true, purgedDays: [DAY1], sampledDays: [DAY2] });
+      expect(report.checks.map((c) => c.name)).toEqual(["manifest", "coverage", "files", "row-counts", `aggregates:${DAY2}`, "rebuild"]);
+      expect(report.checks.find((c) => c.name === "rebuild")?.detail).toContain("1 purged days skipped");
+    });
+
+    it("does not compare the rows still left in a purged day, but still catches a bad day that is fully retained", async () => {
+      await seedRanges(database.sql, [R1, R2, R3]);
+      await exportPublished(database, { chainId: CHAIN_ID, dir });
+      await purgeDecoded(R1[0], R1[1]);
+      // R2's rows belong to the purged day: whatever they hold, Parquet is the only complete copy of that day.
+      await database.sql`update chain.erc20_transfers set value = value + 1 where block_number between ${R2[0]} and ${R2[1]}`;
+      expect((await verify()).ok).toBe(true);
+
+      // Block 1050 is in the other day, which Postgres still holds whole.
+      await database.sql`delete from chain.erc20_transfers where block_number = 1050`;
+      const report = await verify();
+      expect(report.ok).toBe(false);
+      expect(failed(report)).toEqual(expect.arrayContaining(["row-counts", `aggregates:${DAY2}`, "rebuild"]));
+    });
+
+    it("skips everything Postgres-based once every day is purged, leaving the file checks", async () => {
+      await seedRanges(database.sql, [R1, R2, R3]);
+      await exportPublished(database, { chainId: CHAIN_ID, dir });
+      for (const [from, to] of [R1, R2, R3]) await purgeDecoded(from, to);
+
+      const report = await verify();
+
+      expect(report).toMatchObject({ ok: true, purgedDays: [DAY1, DAY2], sampledDays: [] });
+      expect(report.checks.map((c) => c.name)).toEqual(["manifest", "coverage", "files", "row-counts", "rebuild"]);
+    });
   });
 
   it("passes on an empty store with nothing published, fails when something is published but not exported", async () => {

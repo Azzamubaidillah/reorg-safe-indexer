@@ -28,6 +28,15 @@ export interface ExportOptions {
   dir: string;
 }
 
+/** What `exportSnapshot` accepts on top of `ExportOptions`; `exportPublished` never sets this. */
+export interface SnapshotOptions extends ExportOptions {
+  /**
+   * Write days that contain ranges whose decoded rows retention deleted, from the rows that are left. Only the
+   * verifier's scratch export sets it, because it throws that output away after comparing the retained days.
+   */
+  rebuildPurgedDays?: boolean;
+}
+
 export interface PartitionResult {
   kind: Kind;
   day: string;
@@ -109,7 +118,7 @@ export function exportPublished(database: Database, options: ExportOptions): Pro
 }
 
 /** `exportPublished` against a caller-owned snapshot transaction, so the verifier can export and compare in one consistent view. */
-export async function exportSnapshot(sql: Tx, { chainId, dir }: ExportOptions): Promise<ExportSummary> {
+export async function exportSnapshot(sql: Tx, { chainId, dir, rebuildPurgedDays = false }: SnapshotOptions): Promise<ExportSummary> {
   await mkdir(dir, { recursive: true });
   const previous = await readManifest(dir);
   if (previous && previous.chainId !== chainId) throw new Error(`${dir} holds chain ${previous.chainId}, not ${chainId}`);
@@ -141,6 +150,8 @@ export async function exportSnapshot(sql: Tx, { chainId, dir }: ExportOptions): 
       manifest.days[t.day] = { ...old, minBlock: Math.min(old?.minBlock ?? Infinity, Number(t.min)), maxBlock: Math.max(old?.maxBlock ?? 0, Number(t.max)) };
     }
 
+    if (!rebuildPurgedDays) await assertNoPurgedDays(sql, chainId, manifest, touched);
+
     const scratch = await mkdtemp(join(dir, ".duckdb-"));
     const instance = await DuckDBInstance.create(":memory:", { memory_limit: DUCKDB_MEMORY_LIMIT, temp_directory: scratch });
     const connection = await instance.connect();
@@ -171,6 +182,29 @@ export async function exportSnapshot(sql: Tx, { chainId, dir }: ExportOptions): 
   const rowCounts: Record<Kind, number> = { transfers: 0, swaps: 0 };
   for (const entry of Object.values(manifest.days)) for (const kind of KINDS) rowCounts[kind] += entry[kind]?.rows ?? 0;
   return { newRanges: pending.length, partitions, exportedThroughBlock: manifest.exported.length > 0 ? manifest.exportedThroughBlock : null, rowCounts };
+}
+
+/**
+ * A day is rewritten whole from Postgres, so a day that contains a range whose decoded rows were purged would lose
+ * them: once purged, the Parquet file is the only copy. Refuse before anything is written (the manifest is only
+ * written after every partition), and say which days, so an operator can restore the store instead of replacing it.
+ */
+async function assertNoPurgedDays(sql: Tx, chainId: number, manifest: Manifest, touched: { day: string }[]): Promise<void> {
+  const blocked: string[] = [];
+  for (const { day } of touched) {
+    const { minBlock, maxBlock } = manifest.days[day] as DayEntry;
+    const [purged] = await sql`
+      select 1 from ops.ranges
+      where chain_id = ${chainId} and decoded_purged_at is not null and to_block >= ${minBlock} and from_block <= ${maxBlock}
+      limit 1`;
+    if (purged) blocked.push(day);
+  }
+  if (blocked.length > 0) {
+    throw new Error(
+      `refusing to export: day(s) ${blocked.join(", ")} contain ranges whose decoded rows were purged from Postgres, so rewriting the partition would drop them; ` +
+        "the existing Parquet files are the only copy (restore the manifest and files of those days)",
+    );
+  }
 }
 
 interface BuildInput {

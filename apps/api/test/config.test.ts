@@ -11,6 +11,8 @@ describe("loadConfig", () => {
       corsOrigin: "*",
       analyticsDir: "data/analytics",
       analyticsExportIntervalMs: undefined,
+      landingRetentionDays: undefined,
+      decodedRetentionDays: undefined,
       logLevel: "info",
     });
   });
@@ -24,14 +26,27 @@ describe("loadConfig", () => {
       API_CORS_ORIGIN: "https://dash.example",
       ANALYTICS_DIR: "/srv/parquet",
       ANALYTICS_EXPORT_INTERVAL_MS: "60000",
+      LANDING_RETENTION_DAYS: "7",
+      DECODED_RETENTION_DAYS: "14",
       LOG_LEVEL: "warn",
     });
-    expect(config).toMatchObject({ chainId: 11155111, port: 0, host: "0.0.0.0", corsOrigin: "https://dash.example", analyticsDir: "/srv/parquet", analyticsExportIntervalMs: 60_000, logLevel: "warn" });
+    expect(config).toMatchObject({
+      chainId: 11155111,
+      port: 0,
+      host: "0.0.0.0",
+      corsOrigin: "https://dash.example",
+      analyticsDir: "/srv/parquet",
+      analyticsExportIntervalMs: 60_000,
+      landingRetentionDays: 7,
+      decodedRetentionDays: 14,
+      logLevel: "warn",
+    });
   });
 
   it("rejects a missing database URL and nonsense numbers", () => {
     expect(() => loadConfig({})).toThrow();
     expect(() => loadConfig({ DATABASE_URL: "x", API_PORT: "70000" })).toThrow();
     expect(() => loadConfig({ DATABASE_URL: "x", ANALYTICS_EXPORT_INTERVAL_MS: "0" })).toThrow();
+    expect(() => loadConfig({ DATABASE_URL: "x", LANDING_RETENTION_DAYS: "0" })).toThrow();
   });
 });

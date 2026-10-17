@@ -146,6 +146,10 @@ export const Reorg = z.object({
   finalizedBlock: blockNumber,
   orphaned: z.array(BlockRef),
   canonical: z.array(BlockRef),
+  /** Halted rows only: when the operator acknowledged the halt (`ack-halt`); null while the indexer still refuses to start. Always null when rolled back. */
+  acknowledgedAt: isoTimestamp.nullable(),
+  /** The operator's reason for judging it safe to continue; set together with `acknowledgedAt`. */
+  acknowledgement: z.string().nullable(),
 });
 export type Reorg = z.infer<typeof Reorg>;
 export const ReorgsPage = page(Reorg);
@@ -226,6 +230,21 @@ export const LagStats = z.object({
 });
 export type LagStats = z.infer<typeof LagStats>;
 
+/**
+ * What the indexer's retention has deleted so far, and how long it is configured to keep data (null when this
+ * API was not told). A purged range keeps its row in `/v1/ranges`; only its landing logs / decoded rows are gone.
+ */
+export const Retention = z.object({
+  /** Highest block of any range whose landing logs were purged; null while nothing is. Ranges the reconciler has not confirmed stay below it. */
+  landingPurgedThroughBlock: blockNumber.nullable(),
+  /** Highest block of any range whose decoded rows were purged; null while nothing is (and always null when decoded rows are kept forever). */
+  decodedPurgedThroughBlock: blockNumber.nullable(),
+  landingRetentionDays: z.number().positive().nullable(),
+  /** null: unknown, or decoded rows are kept forever. */
+  decodedRetentionDays: z.number().positive().nullable(),
+});
+export type Retention = z.infer<typeof Retention>;
+
 export const Status = z.object({
   chainId: z.number().int(),
   generatedAt: isoTimestamp,
@@ -257,6 +276,7 @@ export const Status = z.object({
     })
     .nullable(),
   lastReorg: Reorg.nullable(),
+  retention: Retention,
 });
 export type Status = z.infer<typeof Status>;
 

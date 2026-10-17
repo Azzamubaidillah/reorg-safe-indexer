@@ -255,6 +255,53 @@ describe("M3 run loop", () => {
     expect((await cli("reconciliations")).code).toBe(2);
   });
 
+  it("retention --dry-run lists what would be purged without writing, and refuses to run without the flag", async () => {
+    startIndexer();
+    await until("finalized ranges published and reconciled", async () => {
+      const matches = await count(database.sql`select count(*)::int as n from ops.reconciliations where status = 'match'`);
+      return (await rangesByStatus()).published === FINALIZED_RANGES && matches === FINALIZED_RANGES;
+    });
+    const logsBefore = await count(database.sql`select count(*)::int as n from chain.logs`);
+
+    // The running indexer keeps everything (its retention is effectively unlimited); the CLI is told 1 day.
+    const dryRun = spawnIndexer({ rpcUrl: rpc.url, maxSpan: RANGE_SIZE, startBlock: START, rangeSize: RANGE_SIZE, args: ["retention", "--dry-run"], extraEnv: { LANDING_RETENTION_DAYS: "1" } });
+    expect((await exitWithin(dryRun, 60_000)).code, dryRun.output()).toBe(0);
+    const plan = JSON.parse(dryRun.stdout()) as { landing: { fromBlock: number; toBlock: number }[]; decoded: unknown[]; manifestProblem: string | null };
+    expect(plan.landing.map((r) => r.fromBlock)).toEqual(Array.from({ length: FINALIZED_RANGES }, (_, i) => START + i * RANGE_SIZE));
+    expect(plan).toMatchObject({ decoded: [], manifestProblem: null });
+    expect(await count(database.sql`select count(*)::int as n from chain.logs`)).toBe(logsBefore);
+    expect(await count(database.sql`select count(*)::int as n from ops.ranges where landing_purged_at is not null`)).toBe(0);
+
+    await stopIndexer();
+    expect((await cli("retention")).code).toBe(2);
+  });
+
+  it("purges landing logs of published, reconciled ranges on its own timer; verify and rebuild-verify stay green", async () => {
+    startIndexer({ LANDING_RETENTION_DAYS: "1", RETENTION_INTERVAL_MS: "100" });
+    await until("every finalized range purged", async () => (await count(database.sql`select count(*)::int as n from ops.ranges where landing_purged_at is not null`)) === FINALIZED_RANGES);
+
+    // Only published ranges lose logs: the candidates above finalized keep theirs, and every range keeps its decoded rows and blocks.
+    const purged = await database.sql<{ status: string }[]>`select status from ops.ranges where landing_purged_at is not null`;
+    expect(purged.every((r) => r.status === "published")).toBe(true);
+    expect(await count(database.sql`select count(*)::int as n from chain.logs where block_number <= ${FINALIZED}`)).toBe(0);
+    expect(await count(database.sql`select count(*)::int as n from chain.logs where block_number > ${FINALIZED}`)).toBe(original.totals(FINALIZED + 1, HEAD).logs);
+    expect(await count(database.sql`select count(*)::int as n from chain.erc20_transfers`)).toBe(original.totals(START, HEAD).transfers);
+    expect(await count(database.sql`select count(*)::int as n from chain.blocks`)).toBe(HEAD - START + 1);
+    await stopIndexer();
+    // Ranges become published and reconciled over several quality/reconcile cycles, so the purge is spread over several
+    // retention cycles; their per-cycle counts must add up to exactly the purged set (no range counted twice). Read after
+    // the graceful stop so the last cycle's log line has been written.
+    const purgedByCycles = indexer!.logs().filter((l) => l.msg === "retention cycle").reduce((sum, l) => sum + (l.landingRanges as number), 0);
+    expect(purgedByCycles).toBe(FINALIZED_RANGES);
+
+    const verify = await cli("verify");
+    expect(verify.code, verify.output).toBe(0);
+    expect(JSON.parse(verify.stdout)).toMatchObject({ ok: true, purged: { landingRanges: FINALIZED_RANGES, decodedRanges: 0 } });
+    const rebuild = await cli("rebuild-verify");
+    expect(rebuild.code, rebuild.output).toBe(0);
+    expect(JSON.parse(rebuild.stdout)).toMatchObject({ equal: true, skippedRanges: FINALIZED_RANGES, logsScanned: original.totals(FINALIZED + 1, HEAD).logs });
+  });
+
   it("rebuild-verify exits 0 on clean data and 1 once a decoded row is tampered with", async () => {
     startIndexer({}, FINALIZED);
     expect((await exitWithin(indexer!, 60_000)).code, indexer!.output()).toBe(0);
