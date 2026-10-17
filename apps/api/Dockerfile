@@ -22,7 +22,6 @@ COPY apps/api/src apps/api/src
 # Parquet partitions live on a volume so exports survive container replacement. verifyAnalytics
 # re-exports into a scratch directory beside the export, so the parent must be writable too.
 RUN mkdir -p /data/analytics && chown -R node:node /data
-RUN mkdir -p /data/analytics && chown node:node /data/analytics
 USER node
 ENV ANALYTICS_DIR=/data/analytics API_HOST=0.0.0.0
 ENTRYPOINT ["node", "--import", "tsx"]
