@@ -1,0 +1,12 @@
+{
+  "name": "@rsi/indexer",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rsi/db": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "pino": "10.4.0",
+    "viem": "2.57.7",
+    "zod": "4.6.7"
+  }
+}

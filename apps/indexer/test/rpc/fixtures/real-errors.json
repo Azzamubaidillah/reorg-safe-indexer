@@ -1,0 +1,9 @@
+{
+  "_comment": "Captured 2026-10-17 with eth_getLogs for USDC over blocks 20000000.. on public endpoints; bodies verbatim.",
+  "cases": [
+    { "provider": "drpc", "status": 400, "message": "ranges over 10000 blocks are not supported on free plan", "kind": "range_too_large" },
+    { "provider": "blastapi", "status": 400, "message": "You can make eth_getLogs requests with up to a 10 block range. Based on your parameters, this block range should work: [0x1312d00, 0x1312d09]", "kind": "range_too_large" },
+    { "provider": "1rpc", "status": 200, "message": "eth_getLogs is limited to 0 - 50 blocks range", "kind": "range_too_large" },
+    { "provider": "mevblocker", "status": 200, "message": "query returned more than 10000 results. Try with this block range [0x1312D00, 0x13130DF].", "kind": "range_too_large" }
+  ]
+}
