@@ -41,6 +41,24 @@ const MAX_RETRIES = 8;
 const backoffMs = (attempt: number) => Math.min(4_000, 250 * 2 ** (attempt - 1));
 
 /**
+ * Resolves with `promise`'s value, or "aborted" once `signal` fires. Racing every await against one
+ * shared never-settling promise leaks: each Promise.race adds a reaction to it that keeps the
+ * settled value (a whole fetched range) reachable forever. Here the abort promise is per call and
+ * its listener is removed when `promise` settles, so nothing outlives the await.
+ */
+export async function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | "aborted"> {
+  if (signal.aborted) return "aborted";
+  const aborted = Promise.withResolvers<"aborted">();
+  const onAbort = () => aborted.resolve("aborted");
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([promise, aborted.promise]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * Follows `latest` (capped at endBlock): fetches up to `fetchConcurrency` ranges ahead but commits
  * them strictly in order, so the committed ranges are always a contiguous prefix. A range that does
  * not extend the stored tip is the reorg signal: the stored chain is rolled back to the common
@@ -48,8 +66,6 @@ const backoffMs = (attempt: number) => Math.min(4_000, 250 * 2 ** (attempt - 1))
  * endBlock is committed or the signal aborts (after any in-flight commit finishes).
  */
 export async function runPipeline(o: PipelineOptions): Promise<void> {
-  const aborted = Promise.withResolvers<"aborted">();
-  o.signal.addEventListener("abort", () => aborted.resolve("aborted"), { once: true });
   if (o.signal.aborted) return;
 
   const addresses = [...o.tokens, ...o.pools];
@@ -66,9 +82,9 @@ export async function runPipeline(o: PipelineOptions): Promise<void> {
   };
 
   while (!o.signal.aborted) {
-    const latest = await Promise.race([latestBlockNumber(o.pool), aborted.promise]);
+    const latest = await untilAborted(latestBlockNumber(o.pool), o.signal);
     if (latest === "aborted") return;
-    if (performance.now() - finalizedAt >= o.pollIntervalMs && (await Promise.race([refreshFinalized(), aborted.promise])) === "aborted") return;
+    if (performance.now() - finalizedAt >= o.pollIntervalMs && (await untilAborted(refreshFinalized(), o.signal)) === "aborted") return;
 
     const target = Math.min(latest, o.endBlock ?? latest);
     if (next > target) {
@@ -100,7 +116,7 @@ export async function runPipeline(o: PipelineOptions): Promise<void> {
           inflight.push(task);
           cursor += o.rangeSize;
         }
-        const head = await Promise.race([inflight.shift()!, aborted.promise]);
+        const head = await untilAborted(inflight.shift()!, o.signal);
         if (head === "aborted") return;
 
         try {
