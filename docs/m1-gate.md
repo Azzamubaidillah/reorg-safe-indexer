@@ -272,3 +272,7 @@ Memory growth is about 9 MB per committed range (about 2 GB in 230 ranges at abo
 ## Code changes
 
 None. The gate was run against `main` as committed.
+
+## Addendum (2026-10-17, after the gate)
+
+The heap leak above is fixed in commit `09f5d43`. The inferred cause was correct: every `await` in the run loop raced one shared, never-settling abort promise, and each `Promise.race` left a reaction on it that kept the settled value (a whole fetched range) reachable. `untilAborted` in `apps/indexer/src/pipeline.ts` now creates the abort promise per call and removes its listener when the awaited promise settles. `apps/indexer/test/until-aborted.test.ts` forces garbage collection and asserts that a settled value is collectable; the same check fails on the old pattern. The gate results above were produced before the fix and are unchanged by it.
