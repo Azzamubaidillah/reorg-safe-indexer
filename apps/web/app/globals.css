@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Colour choices are checked against WCAG AA on white: slate-700 text (10:1), blue-800 links (8.6:1), red-800 / green-800 / amber-900 badges on their tinted backgrounds (>= 7:1). */
+:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+}
+
+body {
+  color: #0f172a;
+  background: #f8fafc;
+}

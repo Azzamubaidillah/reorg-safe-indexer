@@ -15,5 +15,5 @@
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true
   },
-  "include": ["apps/*/src", "apps/*/test", "packages/*/src", "packages/*/drizzle.config.ts", "vitest.config.ts"]
+  "include": ["apps/*/src", "apps/*/test", "packages/*/src", "packages/*/test", "packages/*/drizzle.config.ts", "vitest.config.ts"]
 }

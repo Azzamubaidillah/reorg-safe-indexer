@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start --port 3100",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "lighthouse": "playwright test --config playwright.lighthouse.config.ts",
+    "seed": "tsx e2e/seed.ts"
   },
   "dependencies": {
     "@rsi/contracts": "workspace:*",

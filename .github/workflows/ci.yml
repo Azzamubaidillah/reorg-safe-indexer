@@ -86,3 +86,50 @@ jobs:
         run: pnpm vitest run --project integration reorg
       - name: Reorg against anvil (run ${{ matrix.run }}/10)
         run: pnpm vitest run --project anvil
+
+  # Dashboard gate: the Playwright suite must pass ten independent runs against a freshly seeded DB and production build.
+  dashboard-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: indexer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d indexer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgres://postgres@127.0.0.1:5432/indexer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @rsi/web typecheck
+      - run: pnpm --filter @rsi/web exec playwright install --with-deps chromium
+      - name: Dashboard E2E (run ${{ matrix.run }}/10)
+        run: pnpm --filter @rsi/web e2e
+      - name: Lighthouse accessibility >= 90 on every page
+        if: matrix.run == 1
+        run: pnpm --filter @rsi/web lighthouse
+      - uses: actions/upload-artifact@v4
+        if: failure() || matrix.run == 1
+        with:
+          name: dashboard-reports-${{ matrix.run }}
+          path: |
+            apps/web/test-results/
+            apps/web/lighthouse-report/
+          if-no-files-found: ignore
