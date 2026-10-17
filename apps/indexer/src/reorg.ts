@@ -5,9 +5,20 @@ import type { RpcPool } from "./rpc/pool.ts";
 import { recordHalt, rollbackTo, storedBlocks, storedBounds, type ReorgRecord } from "./store.ts";
 import type { BlockRef } from "./types.ts";
 
+/** What a detected reorg looked like; `ancestorBlock` is null when nothing could be rolled back. */
+export interface ReorgDetails {
+  depth: number;
+  forkBlock: number;
+  ancestorBlock: number | null;
+  finalizedBlock: number;
+}
+
 /** The chains diverge at or below the finalized block, which must never happen: stop instead of guessing. */
 export class ReorgBelowFinalizedError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly details: ReorgDetails,
+  ) {
     super(`reorg below finalized: ${message}`);
     this.name = "ReorgBelowFinalizedError";
   }
@@ -57,7 +68,7 @@ export async function findCommonAncestor(input: AncestorSearchInput): Promise<An
   return finish(undefined);
 }
 
-export type ReorgOutcome = { kind: "rolled_back"; nextBlock: number } | { kind: "no_fork" };
+export type ReorgOutcome = { kind: "rolled_back"; nextBlock: number; details: ReorgDetails } | { kind: "no_fork" };
 
 export interface ReorgContext {
   database: Database;
@@ -108,10 +119,19 @@ export async function resolveReorg(ctx: ReorgContext): Promise<ReorgOutcome> {
   if (search.ancestor === undefined) {
     await recordHalt(database, record);
     log.fatal({ action: "halted", depth: record.depth, forkBlock: record.forkBlock, ancestorBlock: null, rollbackFrom: null }, "reorg");
-    throw new ReorgBelowFinalizedError(`stored blocks ${floor}..${bounds.tip} differ from the canonical chain, finalized block is ${finalized}`);
+    throw new ReorgBelowFinalizedError(`stored blocks ${floor}..${bounds.tip} differ from the canonical chain, finalized block is ${finalized}`, {
+      depth: record.depth,
+      forkBlock: record.forkBlock,
+      ancestorBlock: null,
+      finalizedBlock: finalized,
+    });
   }
 
   const { rollbackFrom } = await rollbackTo(database, { ...record, ancestorBlock: search.ancestor });
   log.warn({ action: "rolled_back", depth: record.depth, forkBlock: record.forkBlock, ancestorBlock: search.ancestor, rollbackFrom }, "reorg");
-  return { kind: "rolled_back", nextBlock: rollbackFrom };
+  return {
+    kind: "rolled_back",
+    nextBlock: rollbackFrom,
+    details: { depth: record.depth, forkBlock: record.forkBlock, ancestorBlock: search.ancestor, finalizedBlock: finalized },
+  };
 }

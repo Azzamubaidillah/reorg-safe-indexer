@@ -1,4 +1,4 @@
-import { and, asc, between, eq, lte, ne, notExists, sql } from "drizzle-orm";
+import { and, asc, between, eq, isNull, lte, ne, notExists, or, sql } from "drizzle-orm";
 import { logs, ranges, reconciliations, type Database, type ReconciliationMismatch } from "@rsi/db";
 import { SWAP_TOPIC, TRANSFER_TOPIC } from "./decode.ts";
 import { getLogsSplit } from "./fetcher.ts";
@@ -231,4 +231,13 @@ export async function explainReconciliation(database: Database, id: number, expl
 
   const [row] = await database.db.select({ status: reconciliations.status }).from(reconciliations).where(eq(reconciliations.id, id));
   throw new Error(row ? `reconciliation ${id} is a ${row.status}, only mismatches take an explanation` : `no reconciliation with id ${id}`);
+}
+
+/** Mismatches nobody has explained yet, oldest first: the rows that keep the M3 gate closed. */
+export async function unexplainedMismatches(database: Database, chainId: number): Promise<(typeof reconciliations.$inferSelect)[]> {
+  return database.db
+    .select()
+    .from(reconciliations)
+    .where(and(eq(reconciliations.chainId, chainId), eq(reconciliations.status, "mismatch"), or(isNull(reconciliations.explanation), eq(reconciliations.explanation, ""))))
+    .orderBy(asc(reconciliations.id));
 }

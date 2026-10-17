@@ -60,6 +60,7 @@ export function spawnAnvilIndexer(o: AnvilIndexerOptions): IndexerProcess {
         .filter((line) => line.startsWith("{"))
         .map((line) => JSON.parse(line) as Record<string, unknown>),
     output: () => `${stdout}${stderr}`,
+    stdout: () => stdout,
   };
 }
 

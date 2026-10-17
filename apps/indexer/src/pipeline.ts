@@ -4,10 +4,31 @@ import type { Logger } from "pino";
 import { decodeRange, SWAP_TOPIC, TRANSFER_TOPIC } from "./decode.ts";
 import { fetchRangeRetrying, finalizedBlockNumber, latestBlockNumber } from "./fetcher.ts";
 import { payloadSha256 } from "./payload.ts";
-import { resolveReorg } from "./reorg.ts";
+import { ReorgBelowFinalizedError, resolveReorg, type ReorgDetails, type ReorgOutcome } from "./reorg.ts";
 import type { RpcPool } from "./rpc/pool.ts";
 import { commitRange, ContinuityError } from "./store.ts";
 import type { DecodedRange, FetchedRange } from "./types.ts";
+
+export interface CommittedRange {
+  toBlock: number;
+  logCount: number;
+}
+
+export interface PipelineReorg extends ReorgDetails {
+  action: "rolled_back" | "halted";
+}
+
+/** Observation points for the caller (metrics, alerts); the pipeline itself knows nothing about them. */
+export interface PipelineEvents {
+  /** After every `latest` read. */
+  onHead?(latest: number): void;
+  /** After every finalized refresh. */
+  onFinalized?(finalized: number): void;
+  /** After a range is committed. */
+  onCommitted?(range: CommittedRange): void;
+  /** After a rollback, or before ReorgBelowFinalizedError is rethrown; awaited, so a halt alert is sent before the run ends. */
+  onReorg?(reorg: PipelineReorg): void | Promise<void>;
+}
 
 export interface PipelineOptions {
   database: Database;
@@ -28,6 +49,7 @@ export interface PipelineOptions {
   pollIntervalMs: number;
   /** How often an idle indexer asks for a new head. */
   headPollIntervalMs: number;
+  events?: PipelineEvents;
 }
 
 interface Prepared {
@@ -79,11 +101,13 @@ export async function runPipeline(o: PipelineOptions): Promise<void> {
     // Providers can lag each other; finality never goes backwards.
     finalized = Math.max(finalized, await finalizedBlockNumber(o.pool));
     finalizedAt = performance.now();
+    o.events?.onFinalized?.(finalized);
   };
 
   while (!o.signal.aborted) {
     const latest = await untilAborted(latestBlockNumber(o.pool), o.signal);
     if (latest === "aborted") return;
+    o.events?.onHead?.(latest);
     if (performance.now() - finalizedAt >= o.pollIntervalMs && (await untilAborted(refreshFinalized(), o.signal)) === "aborted") return;
 
     const target = Math.min(latest, o.endBlock ?? latest);
@@ -130,6 +154,7 @@ export async function runPipeline(o: PipelineOptions): Promise<void> {
           });
           next = head.range.to + 1;
           spurious = 0;
+          o.events?.onCommitted?.({ toBlock: head.range.to, logCount: head.range.logs.length });
           o.log.info(
             { from: head.range.from, to: head.range.to, logs: head.range.logs.length, transfers: head.decoded.transfers.length, swaps: head.decoded.swaps.length, rejects: head.decoded.rejects.length, result },
             "range committed",
@@ -139,8 +164,15 @@ export async function runPipeline(o: PipelineOptions): Promise<void> {
           // Ranges still in flight were fetched against the chain that just lost; drop them.
           // The periodic value can be minutes old; a fork is judged against finality as of now.
           await refreshFinalized();
-          const outcome = await resolveReorg({ database: o.database, pool: o.pool, log: o.log, runId: o.runId, chainId: o.chainId, finalized });
+          let outcome: ReorgOutcome;
+          try {
+            outcome = await resolveReorg({ database: o.database, pool: o.pool, log: o.log, runId: o.runId, chainId: o.chainId, finalized });
+          } catch (halt) {
+            if (halt instanceof ReorgBelowFinalizedError) await o.events?.onReorg?.({ action: "halted", ...halt.details });
+            throw halt;
+          }
           if (outcome.kind === "rolled_back") {
+            await o.events?.onReorg?.({ action: "rolled_back", ...outcome.details });
             next = outcome.nextBlock;
             spurious = 0;
           } else if (++spurious > MAX_RETRIES) {

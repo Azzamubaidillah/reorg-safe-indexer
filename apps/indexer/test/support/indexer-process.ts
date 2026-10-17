@@ -16,6 +16,10 @@ export interface IndexerEnv {
   /** Defaults are short so tests following a moving head do not wait on real-world polling cadence. */
   headPollIntervalMs?: number;
   pollIntervalMs?: number;
+  /** CLI arguments; default `["run"]`. */
+  args?: string[];
+  /** Extra environment variables (M3 settings), applied last. */
+  extraEnv?: Record<string, string>;
 }
 
 export interface IndexerProcess {
@@ -26,12 +30,14 @@ export interface IndexerProcess {
   logs(): Record<string, unknown>[];
   /** Raw stdout + stderr, for failure messages. */
   output(): string;
+  /** Raw stdout only, for CLI subcommands that print JSON. */
+  stdout(): string;
 }
 
 const running = new Set<ChildProcess>();
 
 /**
- * Runs the CLI as `node --import tsx main.ts run` so a SIGKILL hits the indexer
+ * Runs the CLI as `node --import tsx main.ts <args>` (default `run`) so a SIGKILL hits the indexer
  * itself rather than a pnpm or tsx wrapper that would leave it orphaned.
  */
 export function spawnIndexer(options: IndexerEnv): IndexerProcess {
@@ -49,8 +55,9 @@ export function spawnIndexer(options: IndexerEnv): IndexerProcess {
     POLL_INTERVAL_MS: String(options.pollIntervalMs ?? 200),
     LOG_LEVEL: "info",
     ...(options.endBlock === undefined ? {} : { END_BLOCK: String(options.endBlock) }),
+    ...options.extraEnv,
   };
-  const child = spawn(process.execPath, ["--import", "tsx", "apps/indexer/src/main.ts", "run"], { cwd: repoRoot, env });
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/indexer/src/main.ts", ...(options.args ?? ["run"])], { cwd: repoRoot, env });
   running.add(child);
 
   let stdout = "";
@@ -72,6 +79,7 @@ export function spawnIndexer(options: IndexerEnv): IndexerProcess {
         .filter((line) => line.startsWith("{"))
         .map((line) => JSON.parse(line) as Record<string, unknown>),
     output: () => `${stdout}${stderr}`,
+    stdout: () => stdout,
   };
 }
 
