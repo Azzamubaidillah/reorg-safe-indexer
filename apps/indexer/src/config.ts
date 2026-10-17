@@ -45,12 +45,14 @@ const envSchema = z.object({
   ERC20_TOKENS: addressList.optional(),
   UNISWAP_V3_POOLS: addressList.optional(),
   START_BLOCK: z.coerce.number().int().nonnegative(),
-  /** Stop after this block (inclusive). Unset: keep following the finalized head. */
+  /** Stop after this block (inclusive), or at the head if that is lower. Unset: keep following the head. */
   END_BLOCK: z.coerce.number().int().nonnegative().optional(),
   RANGE_SIZE: z.coerce.number().int().positive().default(100),
   FETCH_CONCURRENCY: z.coerce.number().int().positive().default(4),
   /** `finalized` advances once per epoch (~6.4 min on L1); polling faster only burns RPC quota. */
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  /** `latest` moves every ~12 s on L1; this is how often an idle indexer asks for a new head. */
+  HEAD_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(4_000),
   LOG_LEVEL: z.string().default("info"),
 });
 
@@ -65,6 +67,7 @@ export interface Config {
   rangeSize: number;
   fetchConcurrency: number;
   pollIntervalMs: number;
+  headPollIntervalMs: number;
   logLevel: string;
 }
 
@@ -86,6 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rangeSize: e.RANGE_SIZE,
     fetchConcurrency: e.FETCH_CONCURRENCY,
     pollIntervalMs: e.POLL_INTERVAL_MS,
+    headPollIntervalMs: e.HEAD_POLL_INTERVAL_MS,
     logLevel: e.LOG_LEVEL,
   };
 }

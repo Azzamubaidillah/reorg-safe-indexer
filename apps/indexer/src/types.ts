@@ -8,6 +8,12 @@ export interface BlockHeader {
   timestamp: number;
 }
 
+/** A block identity: what reorg detection compares and what `ops.reorgs` records. */
+export interface BlockRef {
+  number: number;
+  hash: Hex;
+}
+
 /** A log as returned by eth_getLogs, normalised to numbers and lowercase hex. */
 export interface RawLog {
   blockNumber: number;

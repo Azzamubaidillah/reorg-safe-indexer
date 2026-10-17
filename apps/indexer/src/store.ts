@@ -1,6 +1,6 @@
-import { and, eq, sql } from "drizzle-orm";
-import { blocks, erc20Transfers, logs, ranges, runs, uniswapV3Swaps, type Database } from "@rsi/db";
-import type { DecodedRange, FetchedRange } from "./types.ts";
+import { and, asc, between, eq, gt, gte, sql } from "drizzle-orm";
+import { blocks, erc20Transfers, logs, ranges, reorgs, runs, uniswapV3Swaps, type Database } from "@rsi/db";
+import type { BlockRef, DecodedRange, FetchedRange, Hex } from "./types.ts";
 
 export class ContinuityError extends Error {
   constructor(message: string) {
@@ -120,6 +120,72 @@ export async function commitRange(database: Database, input: CommitInput): Promi
       .where(eq(runs.id, runId));
     return "committed";
   });
+}
+
+export interface ReorgRecord {
+  chainId: number;
+  runId: string;
+  /** Last known finalized block when the reorg was detected. */
+  finalizedBlock: number;
+  forkBlock: number;
+  depth: number;
+  orphaned: BlockRef[];
+  canonical: BlockRef[];
+}
+
+export interface RollbackInput extends ReorgRecord {
+  /** Highest block both the stored and the canonical chain agree on. */
+  ancestorBlock: number;
+}
+
+/** Lowest and highest stored block height; undefined when nothing is stored. */
+export async function storedBounds(database: Database, chainId: number): Promise<{ first: number; tip: number } | undefined> {
+  const [row] = await database.db
+    .select({ first: sql<string | null>`min(${blocks.number})`, tip: sql<string | null>`max(${blocks.number})` })
+    .from(blocks)
+    .where(eq(blocks.chainId, chainId));
+  return row?.first == null || row.tip == null ? undefined : { first: Number(row.first), tip: Number(row.tip) };
+}
+
+/** Stored blocks in [from, to], ascending. */
+export async function storedBlocks(database: Database, chainId: number, from: number, to: number): Promise<BlockRef[]> {
+  const rows = await database.db
+    .select({ number: blocks.number, hash: blocks.hash })
+    .from(blocks)
+    .where(and(eq(blocks.chainId, chainId), between(blocks.number, from, to)))
+    .orderBy(asc(blocks.number));
+  return rows.map((r) => ({ number: r.number, hash: r.hash as Hex }));
+}
+
+/**
+ * Drops everything above `ancestorBlock` and records why, in one transaction. Ranges are the unit
+ * of re-ingest, so every range reaching past the ancestor goes whole, including its still-canonical
+ * blocks below the ancestor; returns the first deleted height, where ingest restarts.
+ */
+export async function rollbackTo(database: Database, input: RollbackInput): Promise<{ rollbackFrom: number }> {
+  const { chainId, runId, ancestorBlock } = input;
+  return database.db.transaction(async (tx) => {
+    const dropped = await tx
+      .delete(ranges)
+      .where(and(eq(ranges.chainId, chainId), gt(ranges.toBlock, ancestorBlock)))
+      .returning({ fromBlock: ranges.fromBlock });
+    if (dropped.length === 0) throw new Error(`no committed range extends past ancestor ${ancestorBlock}`);
+    const rollbackFrom = Math.min(...dropped.map((r) => r.fromBlock));
+
+    await tx.delete(erc20Transfers).where(and(eq(erc20Transfers.chainId, chainId), gte(erc20Transfers.blockNumber, rollbackFrom)));
+    await tx.delete(uniswapV3Swaps).where(and(eq(uniswapV3Swaps.chainId, chainId), gte(uniswapV3Swaps.blockNumber, rollbackFrom)));
+    await tx.delete(logs).where(and(eq(logs.chainId, chainId), gte(logs.blockNumber, rollbackFrom)));
+    await tx.delete(blocks).where(and(eq(blocks.chainId, chainId), gte(blocks.number, rollbackFrom)));
+
+    await tx.insert(reorgs).values({ ...input, action: "rolled_back", ancestorBlock, rollbackFrom });
+    await tx.update(runs).set({ lastBlock: rollbackFrom - 1 }).where(eq(runs.id, runId));
+    return { rollbackFrom };
+  });
+}
+
+/** Audit row for a reorg the indexer refuses to repair; deletes nothing. */
+export async function recordHalt(database: Database, input: ReorgRecord): Promise<void> {
+  await database.db.insert(reorgs).values({ ...input, action: "halted", ancestorBlock: null, rollbackFrom: null });
 }
 
 export async function startRun(database: Database, runId: string, chainId: number): Promise<void> {

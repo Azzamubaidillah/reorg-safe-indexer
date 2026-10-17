@@ -3,6 +3,7 @@ import { createDb, type Database } from "@rsi/db";
 import pino from "pino";
 import { loadConfig } from "./config.ts";
 import { runPipeline } from "./pipeline.ts";
+import { ReorgBelowFinalizedError } from "./reorg.ts";
 import { RpcPool } from "./rpc/pool.ts";
 import { Provider } from "./rpc/provider.ts";
 import { abandonStaleRuns, finishRun, resumePoint, startRun } from "./store.ts";
@@ -56,8 +57,14 @@ async function run(): Promise<number> {
         rangeSize: config.rangeSize,
         fetchConcurrency: config.fetchConcurrency,
         pollIntervalMs: config.pollIntervalMs,
+        headPollIntervalMs: config.headPollIntervalMs,
       });
     } catch (err) {
+      if (err instanceof ReorgBelowFinalizedError) {
+        // Already logged at fatal level with the reorg details; exit code 2 tells the supervisor not to restart blindly.
+        await finishRun(database, runId, { status: "failed", reason: err.message });
+        return 2;
+      }
       const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       log.error({ err }, "run failed");
       await finishRun(database, runId, { status: "failed", reason });

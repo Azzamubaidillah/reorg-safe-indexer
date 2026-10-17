@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fetchRange, getLogsSplit, InconsistentRangeError } from "../src/fetcher.ts";
+import { fetchCanonicalHeaders, fetchRange, fetchRangeRetrying, getLogsSplit, InconsistentRangeError } from "../src/fetcher.ts";
 import { RpcError } from "../src/rpc/errors.ts";
 import { RpcPool } from "../src/rpc/pool.ts";
 import { fakeNode, makeChain } from "./fake-chain.ts";
@@ -101,5 +101,62 @@ describe("fetchRange", () => {
     const { blocks } = makeChain(100, 110);
     const node = fakeNode({ blocks, logs: makeChain(100, 110).logs, maxSpan: 100, ignoreSpan: true });
     await expect(fetchRange(pool(node), filter(100, 109))).rejects.toThrow(/outside/);
+  });
+});
+
+describe("fetchRangeRetrying", () => {
+  const policy = (extra: Partial<Parameters<typeof fetchRangeRetrying>[2]> = {}) => ({ retries: 3, backoffMs: () => 1, ...extra });
+
+  it("re-fetches a range whose logs disagree with its headers until the node catches up", async () => {
+    const { blocks, logs } = makeChain(1, 10);
+    const stale = logs.map((l) => (l.blockNumber === 7 ? { ...l, blockHash: `0x${"d".repeat(64)}` } : l));
+    const served = [...stale];
+    const node = fakeNode({ blocks, logs: served, maxSpan: 100 });
+    const pool = new RpcPool([node.provider]);
+    const retries: number[] = [];
+
+    const range = await fetchRangeRetrying(pool, filter(1, 10), {
+      ...policy(),
+      onRetry: (_err, attempt) => {
+        retries.push(attempt);
+        // The lagging node catches up after the second failed attempt.
+        if (attempt === 2) served.splice(0, served.length, ...logs);
+      },
+    });
+
+    expect(retries).toEqual([1, 2]);
+    expect(range.logs).toHaveLength(10);
+    expect(range.logs.every((l) => l.blockHash === range.blocks[l.blockNumber - 1]?.hash)).toBe(true);
+  });
+
+  it("gives up after the retry bound and surfaces the inconsistency", async () => {
+    const { blocks, logs } = makeChain(1, 10);
+    const bad = logs.map((l) => ({ ...l, blockHash: `0x${"d".repeat(64)}` }));
+    const node = fakeNode({ blocks, logs: bad, maxSpan: 100, batchSize: 10 });
+    let retried = 0;
+
+    await expect(
+      fetchRangeRetrying(new RpcPool([node.provider]), filter(1, 10), { ...policy({ retries: 2 }), onRetry: () => retried++ }),
+    ).rejects.toThrow(InconsistentRangeError);
+    expect(retried).toBe(2);
+    expect(node.headerRequests).toBe(3);
+  });
+
+  it("does not retry errors that are not inconsistencies", async () => {
+    const { blocks, logs } = makeChain(1, 1);
+    // Rejecting even a single-block span makes getLogs fail with range_too_large.
+    const node = fakeNode({ blocks, logs, maxSpan: 100, rejectAbove: 0 });
+    let retried = 0;
+    await expect(fetchRangeRetrying(new RpcPool([node.provider]), filter(1, 1), { ...policy(), onRetry: () => retried++ })).rejects.toThrow(RpcError);
+    expect(retried).toBe(0);
+  });
+});
+
+describe("fetchCanonicalHeaders", () => {
+  it("returns undefined for heights above the provider's head instead of failing", async () => {
+    const { blocks, logs } = makeChain(1, 5);
+    const node = fakeNode({ blocks, logs, maxSpan: 100, batchSize: 10 });
+    const got = await fetchCanonicalHeaders(new RpcPool([node.provider]), 4, 7);
+    expect(got.map((h) => h?.number)).toEqual([4, 5, undefined, undefined]);
   });
 });

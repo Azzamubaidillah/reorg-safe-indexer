@@ -30,12 +30,30 @@ export async function resetDatabase(url = TEST_DATABASE_URL): Promise<void> {
 
 /** Order-independent fingerprint of each table's full contents, to prove a call wrote nothing. */
 export async function tableFingerprints(database: Database): Promise<Record<string, string>> {
-  const tables = ["chain.blocks", "chain.logs", "chain.erc20_transfers", "chain.uniswap_v3_swaps", "ops.runs", "ops.ranges"];
+  const tables = ["chain.blocks", "chain.logs", "chain.erc20_transfers", "chain.uniswap_v3_swaps", "ops.runs", "ops.ranges", "ops.reorgs"];
   const out: Record<string, string> = {};
   for (const table of tables) {
     const [row] = await database.sql<{ digest: string }[]>`
       select md5(coalesce(string_agg(t::text, '|' order by t::text), '')) as digest from ${database.sql(table)} t`;
     out[table] = row?.digest ?? "";
   }
+  return out;
+}
+
+/**
+ * Fingerprint of what the indexed data is, ignoring when and by which run it was written: the chain
+ * tables plus each range's bounds, counts and payload hash. Equal fingerprints mean equal databases.
+ */
+export async function contentFingerprints(database: Database): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const table of ["chain.blocks", "chain.logs", "chain.erc20_transfers", "chain.uniswap_v3_swaps"]) {
+    const [row] = await database.sql<{ digest: string }[]>`
+      select md5(coalesce(string_agg(t::text, '|' order by t::text), '')) as digest from ${database.sql(table)} t`;
+    out[table] = row?.digest ?? "";
+  }
+  const [ranges] = await database.sql<{ digest: string }[]>`
+    select md5(coalesce(string_agg(concat_ws(',', from_block, to_block, status, block_count, log_count, transfer_count, swap_count, reject_count, payload_sha256), '|' order by from_block), '')) as digest
+    from ops.ranges`;
+  out["ops.ranges"] = ranges?.digest ?? "";
   return out;
 }

@@ -146,3 +146,46 @@ export const ranges = ops.table(
     check("ranges_status_check", sql`${t.status} in ('candidate', 'published', 'failed')`),
   ],
 );
+
+/** A block identity as recorded in `ops.reorgs`. */
+export interface ReorgBlockRef {
+  number: number;
+  hash: string;
+}
+
+/**
+ * Audit trail of every detected reorg. `rolled_back`: stored blocks above
+ * `ancestor_block` were orphaned and removed together with every range that
+ * reached past it (re-ingest restarts at `rollback_from`). `halted`: no common
+ * ancestor at or above the finalized block; nothing was deleted, the run failed.
+ * `fork_block` is the first stored height whose hash differs from the canonical
+ * chain; when halted it is the lowest stored height inspected (the true fork is
+ * at or below it) and `depth` counts only the heights inspected.
+ */
+export const reorgs = ops.table(
+  "reorgs",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    chainId: integer("chain_id").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    action: text("action").notNull(),
+    ancestorBlock: blockNumber("ancestor_block"),
+    forkBlock: blockNumber("fork_block").notNull(),
+    depth: integer("depth").notNull(),
+    rollbackFrom: blockNumber("rollback_from"),
+    finalizedBlock: blockNumber("finalized_block").notNull(),
+    orphaned: jsonb("orphaned").$type<ReorgBlockRef[]>().notNull(),
+    canonical: jsonb("canonical").$type<ReorgBlockRef[]>().notNull(),
+  },
+  (t) => [
+    index("reorgs_chain_detected_idx").on(t.chainId, t.detectedAt),
+    check("reorgs_action_check", sql`${t.action} in ('rolled_back', 'halted')`),
+    check(
+      "reorgs_shape_check",
+      sql`(${t.action} = 'rolled_back' and ${t.ancestorBlock} is not null and ${t.rollbackFrom} is not null) or (${t.action} = 'halted' and ${t.ancestorBlock} is null and ${t.rollbackFrom} is null)`,
+    ),
+  ],
+);
