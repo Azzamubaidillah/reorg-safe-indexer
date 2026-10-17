@@ -9,8 +9,14 @@ import { analyticsMetaQuery, dailyVolumeQuery, poolOhlcQuery } from "../lib/quer
 import { DEFAULT_POOL, DEFAULT_TOKEN, POOLS, TOKENS } from "../lib/tokens.ts";
 import { QueryBoundary, Section, Table, Td, Th } from "./ui.tsx";
 
-/** Large uint256-scale volumes would print as 70-digit axis labels; scientific notation keeps them readable. */
-const axisNumber = (n: number): string => (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3) ? n.toExponential(1) : n.toLocaleString("en-US", { maximumFractionDigits: 4 }));
+const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
+/** Real token volumes read best as 3.6B; scientific notation is kept only for uint256-scale or dust values. */
+const axisNumber = (n: number): string => {
+  const abs = Math.abs(n);
+  if (abs >= 1e15 || (n !== 0 && abs < 1e-3)) return n.toExponential(1);
+  return abs >= 1e6 ? compact.format(n) : n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+};
 
 function Chart({ title, summary, table, children }: { title: string; summary: string; table: ReactNode; children: ReactNode }) {
   return (
