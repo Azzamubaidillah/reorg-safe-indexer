@@ -17,6 +17,7 @@ RUN pnpm install --frozen-lockfile --filter "@rsi/indexer..." --filter reorg-saf
 
 COPY tsconfig.json ./
 COPY packages/db packages/db
+COPY packages/contracts/src packages/contracts/src
 COPY apps/indexer/src apps/indexer/src
 
 USER node

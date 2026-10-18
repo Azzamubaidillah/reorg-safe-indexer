@@ -1,3 +1,4 @@
+import { CHAIN_PRESETS } from "@rsi/contracts";
 import { z } from "zod";
 import type { RetentionPolicy } from "./retention.ts";
 
@@ -22,12 +23,6 @@ export const providerSchema = z.object({
   batchSize: z.number().int().positive().default(1),
 });
 export type ProviderConfig = z.infer<typeof providerSchema>;
-
-/** Contracts indexed on Ethereum mainnet unless overridden: USDC and the Uniswap v3 USDC/WETH 0.05% pool. */
-const MAINNET_DEFAULTS = {
-  ERC20_TOKENS: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-  UNISWAP_V3_POOLS: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
-};
 
 const jsonOf = (name: string) =>
   z.string().transform((s, ctx) => {
@@ -132,9 +127,10 @@ export const loadRetentionConfig = (env: NodeJS.ProcessEnv = process.env): Reten
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const e = envSchema.parse(env);
-  const defaults = e.CHAIN_ID === 1 ? MAINNET_DEFAULTS : undefined;
-  const tokens = e.ERC20_TOKENS ?? (defaults ? addressList.parse(defaults.ERC20_TOKENS) : []);
-  const pools = e.UNISWAP_V3_POOLS ?? (defaults ? addressList.parse(defaults.UNISWAP_V3_POOLS) : []);
+  // Defaults come from the chain preset; an explicit list always wins, and a chain without a preset needs one.
+  const preset = CHAIN_PRESETS[e.CHAIN_ID];
+  const tokens = e.ERC20_TOKENS ?? preset?.tokens.map((t) => t.address) ?? [];
+  const pools = e.UNISWAP_V3_POOLS ?? preset?.pools.map((p) => p.address) ?? [];
   if (tokens.length + pools.length === 0) throw new Error("no contracts configured (ERC20_TOKENS / UNISWAP_V3_POOLS)");
   if (e.END_BLOCK !== undefined && e.END_BLOCK < e.START_BLOCK) throw new Error("END_BLOCK is before START_BLOCK");
   // The reconciliation rows are keyed by provider name; a name shared with an ingest provider would make "second source" meaningless.
