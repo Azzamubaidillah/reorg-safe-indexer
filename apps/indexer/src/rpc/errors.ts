@@ -31,8 +31,9 @@ const RANGE_PATTERNS = [
   /response size (exceeded|too large|should not)/i,
   /too many (logs|results)/i,
   /exceed(s|ed)? (the )?max(imum)? (block )?(range|span)/i,
+  /exceeds? max(imum)? results/i,
 ];
-const RATE_PATTERNS = [/rate.?limit/i, /too many requests/i, /exceeded .*capacity/i, /compute units? per second/i, /throughput/i];
+const RATE_PATTERNS = [/rate.?limit/i, /too many requests/i, /request limit/i, /exceeded .*capacity/i, /compute units? per second/i, /throughput/i];
 const UNSUPPORTED_PATTERNS = [
   /method .*(not (found|supported|available)|does not exist)/i,
   /not supported/i,

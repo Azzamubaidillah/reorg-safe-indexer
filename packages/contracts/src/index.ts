@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./chains.ts";
+
 // Wire contract of the read-only API (v1). Query schemas parse and normalise what a client sends
 // (strings in, typed values out); response schemas describe what the server returns and are
 // what tests and the dashboard parse against. Block numbers fit a JS number; token amounts and

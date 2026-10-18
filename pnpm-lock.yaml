@@ -53,6 +53,9 @@ importers:
 
   apps/indexer:
     dependencies:
+      '@rsi/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@rsi/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -117,6 +120,9 @@ importers:
       '@duckdb/node-api':
         specifier: 1.5.6-r.1
         version: 1.5.6-r.1
+      '@rsi/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@rsi/db':
         specifier: workspace:*
         version: link:../db
