@@ -41,7 +41,9 @@ TELEGRAM_CHAT_ID=
 
 API: `DATABASE_URL`, `CHAIN_ID`, `ANALYTICS_DIR=/data/analytics`, optionally `ANALYTICS_EXPORT_INTERVAL_MS` (unset means the API never exports), `API_CORS_ORIGIN`.
 
-The API only reads. Give it a database user that has `SELECT` on the `chain` and `ops` schemas and nothing else. The repository does not create that role, so this is a deployment step.
+The API only reads. Give it a database user that has `SELECT` on the `chain` and `ops` schemas and nothing else, with a short `statement_timeout` (10 s) so a slow public request cannot hold a connection. The repository does not create that role, so this is a deployment step.
+
+Do not run the Parquet export inside the API under that role. The export rewrites a whole UTC day from Postgres, and once a day holds a few hundred thousand rows its queries exceed a 10 s timeout, so exports fail and the store stops advancing (seen in the live deployment after one full day). Run the analytics CLI `export` on a schedule in its own container instead (for example `while true; do node --import tsx packages/analytics/src/cli.ts export --dir /data/analytics; sleep 600; done` in the API image), as a separate read-only user with a longer timeout (10 min), and leave `ANALYTICS_EXPORT_INTERVAL_MS` unset on the API. Run the analytics `verify` right after an export: it compares against live Postgres, so ranges published since the last export show up as missing coverage on the open day.
 
 ### Migrations
 
@@ -231,7 +233,7 @@ RETENTION_MAX_RANGES=500
 
 - The indexer needs read access to the manifest file (mount the analytics volume read-only into the indexer container). The process refuses to start with `DECODED_RETENTION_DAYS` set and no `ANALYTICS_MANIFEST_PATH`.
 - The API process must have the same `LANDING_RETENTION_DAYS` and `DECODED_RETENTION_DAYS`, otherwise `/v1/status` reports them as null.
-- The Parquet export must be running (`ANALYTICS_EXPORT_INTERVAL_MS` on the API, or the analytics CLI `export` on a schedule). Decoded rows are only purged for blocks the manifest lists as exported.
+- The Parquet export must be running (the analytics CLI `export` on a schedule, as described under [Env files](#env-files)). Decoded rows are only purged for blocks the manifest lists as exported.
 - Start with landing only, watch a few cycles, then add the decoded setting.
 
 ### Before and after
