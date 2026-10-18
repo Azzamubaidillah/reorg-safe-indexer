@@ -18,6 +18,30 @@ describe("loadConfig polling", () => {
   });
 });
 
+describe("chain presets", () => {
+  it("tracks each preset chain's own USDC and USDC/WETH 0.05% pool when no lists are given", () => {
+    expect(loadConfig({ ...base, CHAIN_ID: "1" })).toMatchObject({
+      tokens: ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+      pools: ["0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"],
+    });
+    expect(loadConfig({ ...base, CHAIN_ID: "8453" })).toMatchObject({
+      tokens: ["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"],
+      pools: ["0xd0b53d9277642d899df5c87a3966a349a798f224"],
+    });
+  });
+
+  it("lets an explicit list replace the preset for that kind only", () => {
+    const config = loadConfig({ ...base, CHAIN_ID: "8453", ERC20_TOKENS: "0x4200000000000000000000000000000000000006" });
+    expect(config.tokens).toEqual(["0x4200000000000000000000000000000000000006"]);
+    expect(config.pools).toEqual(["0xd0b53d9277642d899df5c87a3966a349a798f224"]);
+  });
+
+  it("refuses a chain without a preset unless contracts are listed", () => {
+    expect(() => loadConfig({ ...base, CHAIN_ID: "10" })).toThrow(/no contracts configured/);
+    expect(loadConfig({ ...base, CHAIN_ID: "10", UNISWAP_V3_POOLS: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640" }).tokens).toEqual([]);
+  });
+});
+
 describe("loadConfig M3 settings", () => {
   const mock = { name: "second", url: "http://localhost:9545", maxSpan: 5, rps: 2 };
 

@@ -1,3 +1,7 @@
+import { CHAIN_PRESETS, type PriceDirection } from "@rsi/contracts";
+
+export type { PriceDirection };
+
 /** Everything the Parquet files do not carry: decimals are a property of the contract, not of an event. */
 export interface TokenMeta {
   symbol: string;
@@ -11,28 +15,24 @@ export interface PoolMeta {
   defaultDirection: PriceDirection;
 }
 
-/**
- * `token1PerToken0`: how many whole token1 one whole token0 costs (what Uniswap's sqrtPriceX96 encodes, decimal-adjusted).
- * `token0PerToken1`: the inverse, e.g. USDC per ETH for the USDC/WETH pool.
- */
-export type PriceDirection = "token1PerToken0" | "token0PerToken1";
-
 export interface AnalyticsMetadata {
   pools: Record<string, PoolMeta>;
 }
 
-const USDC: TokenMeta = { symbol: "USDC", decimals: 6 };
-const WETH: TokenMeta = { symbol: "WETH", decimals: 18 };
-
 /**
- * Ethereum mainnet defaults, matching the indexer's default contracts. Keys are lowercase addresses.
- * Override by passing `metadata` to `AnalyticsReader` / `verifyAnalytics` (the CLI reads `--metadata <file.json>`).
+ * Every preset pool of every chain, keyed by lowercase address. Pool addresses do not collide across chains, so one map
+ * serves whichever chain the store was exported from. Override by passing `metadata` to `AnalyticsReader` /
+ * `verifyAnalytics` (the CLI reads `--metadata <file.json>`).
  */
 export const DEFAULT_METADATA: AnalyticsMetadata = {
-  pools: {
-    // Uniswap v3 USDC/WETH 0.05%: token0 = USDC, token1 = WETH, so the readable price is USDC per ETH.
-    "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640": { token0: USDC, token1: WETH, defaultDirection: "token0PerToken1" },
-  },
+  pools: Object.fromEntries(
+    Object.values(CHAIN_PRESETS).flatMap((chain) =>
+      chain.pools.map((p) => [
+        p.address,
+        { token0: { symbol: p.token0.symbol, decimals: p.token0.decimals }, token1: { symbol: p.token1.symbol, decimals: p.token1.decimals }, defaultDirection: p.defaultDirection },
+      ]),
+    ),
+  ),
 };
 
 export class UnknownPoolError extends Error {

@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@rsi/contracts": "workspace:*",
     "@rsi/db": "workspace:*",
     "drizzle-orm": "0.45.4",
     "pino": "10.4.0",

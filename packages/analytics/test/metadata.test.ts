@@ -21,3 +21,15 @@ describe("sqrtPriceToPrice", () => {
     expect(pool.defaultDirection).toBe("token0PerToken1");
   });
 });
+
+describe("Base WETH/USDC metadata (WETH sorts first on Base)", () => {
+  const base = DEFAULT_METADATA.pools["0xd0b53d9277642d899df5c87a3966a349a798f224"]!;
+
+  // 2500 USDC per WETH with token0 = WETH (18) and token1 = USDC (6): raw token1/token0 = 2500e6 / 1e18 = 2.5e-9,
+  // sqrt = 5e-5 = 1/20000, so sqrtPriceX96 = 2^96 / 20000. The mainnet pool has the opposite token order.
+  it("reads USDC per ETH by default, which on Base is token1 per token0", () => {
+    expect(base.token0).toEqual({ symbol: "WETH", decimals: 18 });
+    expect(base.token1).toEqual({ symbol: "USDC", decimals: 6 });
+    expect(sqrtPriceToPrice(Q96 / 20_000n, base, base.defaultDirection)).toBeCloseTo(2500, 6);
+  });
+});

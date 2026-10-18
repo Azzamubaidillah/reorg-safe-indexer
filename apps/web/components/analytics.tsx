@@ -1,12 +1,12 @@
 "use client";
 
-import { OHLC_INTERVALS, type DailyVolumeRow, type OhlcInterval, type PoolOhlcRow } from "@rsi/contracts";
+import { CHAIN_PRESETS, OHLC_INTERVALS, type DailyVolumeRow, type OhlcInterval, type PoolOhlcRow } from "@rsi/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { useId, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatInt, formatUnits, formatUtc } from "../lib/format.ts";
-import { analyticsMetaQuery, dailyVolumeQuery, poolOhlcQuery } from "../lib/queries.ts";
-import { DEFAULT_POOL, DEFAULT_TOKEN, POOLS, TOKENS } from "../lib/tokens.ts";
+import { analyticsMetaQuery, dailyVolumeQuery, poolOhlcQuery, statusQuery } from "../lib/queries.ts";
+import { POOLS, TOKENS } from "../lib/tokens.ts";
 import { QueryBoundary, Section, Table, Td, Th } from "./ui.tsx";
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
@@ -174,8 +174,13 @@ const field = "mt-1 block rounded border border-slate-500 bg-white px-2 py-1 tex
 
 export function AnalyticsView() {
   const id = useId();
-  const [token, setToken] = useState(DEFAULT_TOKEN);
-  const [pool, setPool] = useState(DEFAULT_POOL);
+  // The pickers offer the preset contracts of the chain the API serves; until /v1/status answers they are empty.
+  const status = useQuery(statusQuery());
+  const preset = status.data ? CHAIN_PRESETS[status.data.chainId] : undefined;
+  const [tokenChoice, setToken] = useState<string>();
+  const [poolChoice, setPool] = useState<string>();
+  const token = tokenChoice ?? preset?.tokens[0]?.address ?? "";
+  const pool = poolChoice ?? preset?.pools[0]?.address ?? "";
   const [interval, setInterval] = useState<OhlcInterval>("1h");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -195,9 +200,9 @@ export function AnalyticsView() {
               Token
             </label>
             <select id={`${id}-token`} className={field} value={token} onChange={(e) => setToken(e.target.value)}>
-              {Object.entries(TOKENS).map(([address, info]) => (
-                <option key={address} value={address}>
-                  {info.symbol}
+              {(preset?.tokens ?? []).map((t) => (
+                <option key={t.address} value={t.address}>
+                  {t.symbol}
                 </option>
               ))}
             </select>
@@ -207,9 +212,9 @@ export function AnalyticsView() {
               Pool
             </label>
             <select id={`${id}-pool`} className={field} value={pool} onChange={(e) => setPool(e.target.value)}>
-              {Object.entries(POOLS).map(([address, info]) => (
-                <option key={address} value={address}>
-                  {info.label}
+              {(preset?.pools ?? []).map((p) => (
+                <option key={p.address} value={p.address}>
+                  {p.label}
                 </option>
               ))}
             </select>

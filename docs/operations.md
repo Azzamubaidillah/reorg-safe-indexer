@@ -9,8 +9,8 @@ Run the indexer with `node --import tsx apps/indexer/src/main.ts <command>` (or 
 | `DATABASE_URL` | required | Postgres connection string. |
 | `CHAIN_ID` | `1` | Chain being indexed; also scopes every CLI subcommand. |
 | `RPC_PROVIDERS` | required | JSON array of `{name, url, maxSpan, rps, batchSize?}`, in preference order. |
-| `ERC20_TOKENS` | mainnet USDC when `CHAIN_ID=1` | Comma-separated token addresses (`Transfer` events). |
-| `UNISWAP_V3_POOLS` | mainnet USDC/WETH 0.05% when `CHAIN_ID=1` | Comma-separated pool addresses (`Swap` events). |
+| `ERC20_TOKENS` | the chain preset's USDC (chains 1 and 8453) | Comma-separated token addresses (`Transfer` events). Set it to replace the preset's tokens. |
+| `UNISWAP_V3_POOLS` | the chain preset's USDC/WETH 0.05% pool (chains 1 and 8453) | Comma-separated pool addresses (`Swap` events). Set it to replace the preset's pools. A chain without a preset needs at least one of the two lists. |
 | `START_BLOCK` | required | First block on an empty database; later runs resume from the stored tip. |
 | `END_BLOCK` | unset | Stop after this block; unset follows the head. |
 | `RANGE_SIZE` | `100` | Blocks per committed range. |
