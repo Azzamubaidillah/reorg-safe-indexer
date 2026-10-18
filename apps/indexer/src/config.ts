@@ -74,6 +74,16 @@ const envSchema = retentionEnv.extend({
   RECONCILE_PROVIDER: jsonOf("RECONCILE_PROVIDER").pipe(providerSchema).optional(),
   RECONCILE_LIMIT: z.coerce.number().int().positive().default(5),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  /** Etherscan API key for the spot-check sampler. Unset or blank: no Etherscan checks. */
+  ETHERSCAN_API_KEY: z
+    .string()
+    .trim()
+    .transform((s) => s || undefined)
+    .optional(),
+  /** Random finalized ranges checked per cycle. The free plan allows 100k calls/day; a range costs one call per contract plus one header. */
+  ETHERSCAN_SAMPLE_SIZE: z.coerce.number().int().positive().default(20),
+  ETHERSCAN_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
+  ETHERSCAN_RPS: z.coerce.number().positive().max(5).default(2),
   /** 0 or unset: no status server. */
   METRICS_PORT: z.coerce.number().int().min(0).max(65_535).optional(),
   METRICS_HOST: z.string().min(1).default("127.0.0.1"),
@@ -100,6 +110,8 @@ export interface Config {
   reconcileProvider: ProviderConfig | undefined;
   reconcileLimit: number;
   reconcileIntervalMs: number;
+  /** Etherscan spot checks; undefined when ETHERSCAN_API_KEY is unset. */
+  etherscan: { apiKey: string; sampleSize: number; intervalMs: number; rps: number } | undefined;
   /** Port of the /metrics, /healthz and /status server; undefined disables it. */
   metricsPort: number | undefined;
   metricsHost: string;
@@ -159,6 +171,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcileProvider: e.RECONCILE_PROVIDER,
     reconcileLimit: e.RECONCILE_LIMIT,
     reconcileIntervalMs: e.RECONCILE_INTERVAL_MS,
+    etherscan: e.ETHERSCAN_API_KEY
+      ? { apiKey: e.ETHERSCAN_API_KEY, sampleSize: e.ETHERSCAN_SAMPLE_SIZE, intervalMs: e.ETHERSCAN_INTERVAL_MS, rps: e.ETHERSCAN_RPS }
+      : undefined,
     metricsPort: e.METRICS_PORT || undefined,
     metricsHost: e.METRICS_HOST,
     healthStaleAfterMs: e.HEALTH_STALE_AFTER_MS,

@@ -86,6 +86,8 @@ export interface ReconcileInput {
   /** Most ranges examined in one call. */
   limit: number;
   contracts: TrackedContracts;
+  /** `oldest` walks every finalized range in order; `random` spot-checks a sample (for rate-limited sources). Default `oldest`. */
+  order?: "oldest" | "random";
 }
 
 export interface ReconcileFailure {
@@ -113,32 +115,50 @@ interface WireHeader {
 
 const quantity = (n: number) => `0x${n.toString(16)}`;
 
-interface Observed {
+/** What a second source reports for a range: the tracked logs and the hash of the range's last block. */
+export interface ObservedRange {
   logs: LogIdentity[];
   lastBlockHash: string;
 }
 
-/** Header first: a second source that has not reached the range yet is an error, not a pile of mismatches. */
-async function observeRange(provider: Provider, contracts: TrackedContracts, from: number, to: number): Promise<Observed> {
-  const header = await provider.request<WireHeader | null>("eth_getBlockByNumber", [quantity(to), false]);
-  if (!header) throw new Error(`${provider.name} has no block ${to}`);
-  if (Number(header.number) !== to) throw new Error(`${provider.name} answered block ${Number(header.number)} for ${to}`);
-  const found = await getLogsSplit(provider, {
-    from,
-    to,
-    addresses: [...contracts.tokens, ...contracts.pools],
-    topic0s: [TRANSFER_TOPIC, SWAP_TOPIC],
-  });
-  return { logs: found, lastBlockHash: header.hash.toLowerCase() };
+/**
+ * Anything that can independently report a range: a JSON-RPC provider, or a block explorer API.
+ * `name` keys the `ops.reconciliations` rows; `calls` counts requests by method for the summary.
+ */
+export interface SecondSource {
+  readonly name: string;
+  readonly calls: Record<string, number>;
+  /** Must throw when the source cannot answer for the whole range: a partial answer would read as a mismatch. */
+  observe(contracts: TrackedContracts, from: number, to: number): Promise<ObservedRange>;
+}
+
+/** A JSON-RPC provider as a second source. Header first: a provider that has not reached the range yet is an error, not a pile of mismatches. */
+export function rpcSecondSource(provider: Provider): SecondSource {
+  return {
+    name: provider.name,
+    calls: provider.calls,
+    async observe(contracts, from, to) {
+      const header = await provider.request<WireHeader | null>("eth_getBlockByNumber", [quantity(to), false]);
+      if (!header) throw new Error(`${provider.name} has no block ${to}`);
+      if (Number(header.number) !== to) throw new Error(`${provider.name} answered block ${Number(header.number)} for ${to}`);
+      const found = await getLogsSplit(provider, {
+        from,
+        to,
+        addresses: [...contracts.tokens, ...contracts.pools],
+        topic0s: [TRANSFER_TOPIC, SWAP_TOPIC],
+      });
+      return { logs: found, lastBlockHash: header.hash.toLowerCase() };
+    },
+  };
 }
 
 /**
- * Re-reads the oldest finalized ranges not yet checked against `provider` and records one
- * `ops.reconciliations` row each. A provider failure writes nothing, so the range comes up again
- * on the next call; database errors propagate.
+ * Re-reads finalized ranges not yet checked against `source` (oldest first, or a random sample) and
+ * records one `ops.reconciliations` row each. A source failure writes nothing, so the range comes up
+ * again on a later call; database errors propagate.
  */
-export async function reconcileRanges(database: Database, provider: Provider, input: ReconcileInput): Promise<ReconcileSummary> {
-  const { chainId, finalizedBlock, limit, contracts } = input;
+export async function reconcileRanges(database: Database, source: SecondSource, input: ReconcileInput): Promise<ReconcileSummary> {
+  const { chainId, finalizedBlock, limit, contracts, order = "oldest" } = input;
   const due = await database.db
     .select({ fromBlock: ranges.fromBlock, toBlock: ranges.toBlock })
     .from(ranges)
@@ -158,73 +178,88 @@ export async function reconcileRanges(database: Database, provider: Provider, in
                 eq(reconciliations.chainId, ranges.chainId),
                 eq(reconciliations.fromBlock, ranges.fromBlock),
                 eq(reconciliations.toBlock, ranges.toBlock),
-                eq(reconciliations.provider, provider.name),
+                eq(reconciliations.provider, source.name),
               ),
             ),
         ),
       ),
     )
-    .orderBy(asc(ranges.fromBlock))
+    .orderBy(order === "random" ? sql`random()` : asc(ranges.fromBlock))
     .limit(limit);
 
-  const callsBefore = { ...provider.calls };
+  const callsBefore = { ...source.calls };
   const summary: ReconcileSummary = { rangesChecked: 0, matches: 0, mismatchIds: [], providerErrors: 0, failures: [], rpcCalls: {} };
 
   for (const { fromBlock, toBlock } of due) {
-    let observed: Observed;
+    let observed: ObservedRange;
     try {
-      observed = await observeRange(provider, contracts, fromBlock, toBlock);
+      observed = await source.observe(contracts, fromBlock, toBlock);
     } catch (err) {
       summary.providerErrors++;
       summary.failures.push({ fromBlock, toBlock, message: err instanceof Error ? err.message : String(err) });
       continue;
     }
-
-    const storedLogs = await database.db
-      .select({ blockNumber: logs.blockNumber, blockHash: logs.blockHash, logIndex: logs.logIndex, txHash: logs.txHash })
-      .from(logs)
-      .where(and(eq(logs.chainId, chainId), between(logs.blockNumber, fromBlock, toBlock)));
-    // Read after the logs: a purge deletes them and sets this flag in one transaction, so a flag still unset
-    // means the logs above were whole, and a set flag means they may be missing and must not be compared.
-    const [flagged] = await database.db
-      .select({ purgedAt: ranges.landingPurgedAt })
-      .from(ranges)
-      .where(and(eq(ranges.chainId, chainId), eq(ranges.fromBlock, fromBlock)));
-    if (flagged?.purgedAt) continue;
-    const blockHashes = new Map((await storedBlocks(database, chainId, fromBlock, toBlock)).map((b) => [b.number, b.hash]));
-
-    const result = compareRange({
-      from: fromBlock,
-      to: toBlock,
-      stored: { logs: storedLogs, blockHashes },
-      observed,
-    });
-    const [row] = await database.db
-      .insert(reconciliations)
-      .values({
-        chainId,
-        fromBlock,
-        toBlock,
-        provider: provider.name,
-        status: result.status,
-        blocksChecked: result.blocksChecked,
-        hashMismatches: result.hashMismatches,
-        storedLogCount: result.storedLogCount,
-        observedLogCount: result.observedLogCount,
-      })
-      .returning({ id: reconciliations.id });
-    if (!row) throw new Error(`reconciliation insert for ${fromBlock}-${toBlock} returned no row`);
-
+    const recorded = await recordComparison(database, { chainId, source: source.name, fromBlock, toBlock, observed });
+    if (recorded === "purged") continue;
     summary.rangesChecked++;
-    if (result.status === "match") summary.matches++;
-    else summary.mismatchIds.push(row.id);
+    if (recorded.status === "match") summary.matches++;
+    else summary.mismatchIds.push(recorded.id);
   }
 
-  for (const [method, count] of Object.entries(provider.calls)) {
+  for (const [method, count] of Object.entries(source.calls)) {
     const used = count - (callsBefore[method] ?? 0);
     if (used > 0) summary.rpcCalls[method] = used;
   }
   return summary;
+}
+
+interface RecordComparisonInput {
+  chainId: number;
+  /** Stored in `ops.reconciliations.provider`; one row per range and source. */
+  source: string;
+  fromBlock: number;
+  toBlock: number;
+  observed: ObservedRange;
+}
+
+/**
+ * Compares what a second source observed with the stored range and records one `ops.reconciliations`
+ * row. Returns "purged" (and writes nothing) when the range's landing logs were purged meanwhile.
+ */
+async function recordComparison(
+  database: Database,
+  { chainId, source, fromBlock, toBlock, observed }: RecordComparisonInput,
+): Promise<{ id: number; status: RangeComparison["status"] } | "purged"> {
+  const storedLogs = await database.db
+    .select({ blockNumber: logs.blockNumber, blockHash: logs.blockHash, logIndex: logs.logIndex, txHash: logs.txHash })
+    .from(logs)
+    .where(and(eq(logs.chainId, chainId), between(logs.blockNumber, fromBlock, toBlock)));
+  // Read after the logs: a purge deletes them and sets this flag in one transaction, so a flag still unset
+  // means the logs above were whole, and a set flag means they may be missing and must not be compared.
+  const [flagged] = await database.db
+    .select({ purgedAt: ranges.landingPurgedAt })
+    .from(ranges)
+    .where(and(eq(ranges.chainId, chainId), eq(ranges.fromBlock, fromBlock)));
+  if (flagged?.purgedAt) return "purged";
+  const blockHashes = new Map((await storedBlocks(database, chainId, fromBlock, toBlock)).map((b) => [b.number, b.hash]));
+
+  const result = compareRange({ from: fromBlock, to: toBlock, stored: { logs: storedLogs, blockHashes }, observed });
+  const [row] = await database.db
+    .insert(reconciliations)
+    .values({
+      chainId,
+      fromBlock,
+      toBlock,
+      provider: source,
+      status: result.status,
+      blocksChecked: result.blocksChecked,
+      hashMismatches: result.hashMismatches,
+      storedLogCount: result.storedLogCount,
+      observedLogCount: result.observedLogCount,
+    })
+    .returning({ id: reconciliations.id });
+  if (!row) throw new Error(`reconciliation insert for ${fromBlock}-${toBlock} returned no row`);
+  return { id: row.id, status: result.status };
 }
 
 /** Records why a mismatch is understood; only mismatches need one, and the text must say something. */

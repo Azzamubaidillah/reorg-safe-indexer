@@ -10,7 +10,8 @@ import { Metrics } from "./metrics.ts";
 import { runPipeline } from "./pipeline.ts";
 import { runQualityCycle } from "./quality.ts";
 import { verifyRebuild } from "./rebuild.ts";
-import { explainReconciliation, reconcileRanges, unexplainedMismatches } from "./reconcile.ts";
+import { EtherscanSource } from "./etherscan.ts";
+import { explainReconciliation, reconcileRanges, rpcSecondSource, unexplainedMismatches, type ReconcileInput, type SecondSource } from "./reconcile.ts";
 import { ReorgBelowFinalizedError } from "./reorg.ts";
 import { planRetention, runRetentionCycle } from "./retention.ts";
 import { RpcPool } from "./rpc/pool.ts";
@@ -22,8 +23,8 @@ import { verifyIntegrity } from "./verify.ts";
 
 // Namespace for the per-chain advisory lock: pg_try_advisory_lock(LOCK_NAMESPACE, chainId).
 const LOCK_NAMESPACE = 0x72736900;
-// Lock connection + pipeline + quality + reconcile + retention + lag/status queries each need one connection at a time.
-const RUN_POOL_SIZE = 7;
+// Lock connection + pipeline + quality + two reconcile loops (RPC, Etherscan) + retention + lag/status queries each need one connection at a time.
+const RUN_POOL_SIZE = 8;
 const HOUR_MS = 3_600_000;
 const DEFAULT_LAG_REPORT_WINDOW = "24h";
 
@@ -209,26 +210,31 @@ function startBackground(input: BackgroundInput): Promise<unknown> {
     }),
   );
 
+  // One loop per second source: the JSON-RPC reconciler walks every finalized range in order; Etherscan,
+  // rate-limited and metered, spot-checks a random sample. Both write ops.reconciliations rows under their own name.
+  const reconcileLoop = (source: SecondSource, intervalMs: number, limit: number, order: ReconcileInput["order"]) =>
+    every(`reconcile:${source.name}`, intervalMs, async () => {
+      const { finalizedBlock } = metrics.snapshot();
+      if (finalizedBlock === null) return;
+      const summary = await reconcileRanges(database, source, { chainId, finalizedBlock, limit, contracts, order });
+      metrics.onReconciliation({ mismatches: summary.mismatchIds.length });
+      if (summary.providerErrors > 0) log.warn({ provider: source.name, failures: summary.failures }, "second source could not answer for some ranges");
+      if (summary.mismatchIds.length === 0) return;
+      const mismatched = await database.db
+        .select({ fromBlock: reconciliations.fromBlock, toBlock: reconciliations.toBlock })
+        .from(reconciliations)
+        .where(inArray(reconciliations.id, summary.mismatchIds));
+      for (const range of mismatched) {
+        log.error({ ...range, provider: source.name }, "reconciliation mismatch");
+        await alerter.reconciliationMismatch(range);
+      }
+    });
   if (config.reconcileProvider) {
-    const secondSource = new Provider(config.reconcileProvider);
-    loops.push(
-      every("reconcile", config.reconcileIntervalMs, async () => {
-        const { finalizedBlock } = metrics.snapshot();
-        if (finalizedBlock === null) return;
-        const summary = await reconcileRanges(database, secondSource, { chainId, finalizedBlock, limit: config.reconcileLimit, contracts });
-        metrics.onReconciliation({ mismatches: summary.mismatchIds.length });
-        if (summary.providerErrors > 0) log.warn({ failures: summary.failures }, "second source could not answer for some ranges");
-        if (summary.mismatchIds.length === 0) return;
-        const mismatched = await database.db
-          .select({ fromBlock: reconciliations.fromBlock, toBlock: reconciliations.toBlock })
-          .from(reconciliations)
-          .where(inArray(reconciliations.id, summary.mismatchIds));
-        for (const range of mismatched) {
-          log.error({ ...range, provider: secondSource.name }, "reconciliation mismatch");
-          await alerter.reconciliationMismatch(range);
-        }
-      }),
-    );
+    loops.push(reconcileLoop(rpcSecondSource(new Provider(config.reconcileProvider)), config.reconcileIntervalMs, config.reconcileLimit, "oldest"));
+  }
+  if (config.etherscan) {
+    const etherscan = new EtherscanSource({ apiKey: config.etherscan.apiKey, chainId, rps: config.etherscan.rps });
+    loops.push(reconcileLoop(etherscan, config.etherscan.intervalMs, config.etherscan.sampleSize, "random"));
   }
 
   loops.push(

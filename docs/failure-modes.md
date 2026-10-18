@@ -68,5 +68,5 @@ What can go wrong, how the system notices, what it does, and which test shows it
 - No authentication, so a public API address is a public read of everything the API serves ([decisions.md](decisions.md#adr-016-read-only-api-with-fail-closed-queries-and-keyset-pagination)).
 - No standby indexer and no database replica: recovery from a lost host is restore or re-ingest.
 - A provider pair that shares an upstream node and gives the same wrong answer defeats both ingestion and reconciliation.
-- The planned Etherscan sampler, a third completeness source, is not built.
+- Etherscan, the third completeness source, checks a random sample of finalized ranges, not all of them (tests: `apps/indexer/test/etherscan.test.ts`, `etherscan.int.test.ts`).
 - Disk exhaustion is handled by operator monitoring, not by the code.

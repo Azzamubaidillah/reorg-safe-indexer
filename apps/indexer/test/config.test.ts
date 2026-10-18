@@ -56,6 +56,19 @@ describe("loadConfig M3 settings", () => {
   });
 });
 
+describe("Etherscan spot-check settings", () => {
+  it("is off without a key, and samples 20 ranges hourly at 2 calls/s with one", () => {
+    expect(loadConfig(base).etherscan).toBeUndefined();
+    expect(loadConfig({ ...base, ETHERSCAN_API_KEY: "  " }).etherscan).toBeUndefined();
+    expect(loadConfig({ ...base, ETHERSCAN_API_KEY: "abc" }).etherscan).toEqual({ apiKey: "abc", sampleSize: 20, intervalMs: 3_600_000, rps: 2 });
+  });
+
+  it("refuses a call rate above Etherscan's per-second cap", () => {
+    expect(() => loadConfig({ ...base, ETHERSCAN_API_KEY: "abc", ETHERSCAN_RPS: "6" })).toThrow();
+    expect(loadConfig({ ...base, ETHERSCAN_API_KEY: "abc", ETHERSCAN_SAMPLE_SIZE: "5", ETHERSCAN_RPS: "3" }).etherscan).toMatchObject({ sampleSize: 5, rps: 3 });
+  });
+});
+
 describe("retention settings", () => {
   const DAY = 86_400_000;
 

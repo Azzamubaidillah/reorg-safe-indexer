@@ -2,7 +2,7 @@ import { createDb, ranges, reconciliations, type Database } from "@rsi/db";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { payloadSha256 } from "../src/payload.ts";
-import { explainReconciliation, reconcileRanges, type ReconcileSummary } from "../src/reconcile.ts";
+import { explainReconciliation, reconcileRanges, rpcSecondSource, type ReconcileSummary } from "../src/reconcile.ts";
 import { Provider } from "../src/rpc/provider.ts";
 import { commitRange, startRun } from "../src/store.ts";
 import type { TrackedContracts } from "../src/types.ts";
@@ -40,7 +40,7 @@ function provider(name = "second", tamper?: Tamper): Provider {
 
 const heightOf = (tag: unknown) => Number.parseInt(String(tag), 16);
 const reconcile = (p: Provider, finalizedBlock = LAST, limit = 100): Promise<ReconcileSummary> =>
-  reconcileRanges(database, p, { chainId: CHAIN_ID, finalizedBlock, limit, contracts });
+  reconcileRanges(database, rpcSecondSource(p), { chainId: CHAIN_ID, finalizedBlock, limit, contracts });
 const rows = () => database.db.select().from(reconciliations).orderBy(reconciliations.fromBlock);
 
 /** Logs of the mock's answer with one rewritten or removed; everything else passes through. */

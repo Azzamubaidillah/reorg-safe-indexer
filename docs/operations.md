@@ -23,6 +23,10 @@ Run the indexer with `node --import tsx apps/indexer/src/main.ts <command>` (or 
 | `RECONCILE_PROVIDER` | unset (off) | JSON for the second source, same shape as one `RPC_PROVIDERS` entry. Its `name` must differ from every `RPC_PROVIDERS` name. |
 | `RECONCILE_LIMIT` | `5` | Finalized ranges checked per reconcile cycle. |
 | `RECONCILE_INTERVAL_MS` | `300000` | Pause between reconcile cycles. |
+| `ETHERSCAN_API_KEY` | unset (off) | Turns on Etherscan spot checks: a random sample of finalized ranges is re-read from Etherscan's own log index (API v2, for the chain in `CHAIN_ID`) and recorded in `ops.reconciliations` as provider `etherscan`, alongside the JSON-RPC reconciler. Mismatches alert and need an explanation like any other. Never commit the key. |
+| `ETHERSCAN_SAMPLE_SIZE` | `20` | Ranges sampled per cycle, chosen at random among finalized ranges not yet checked by Etherscan and whose landing logs still exist. A range costs one header call plus one `getLogs` per tracked contract (more pages for ranges above 1,000 logs per contract). |
+| `ETHERSCAN_INTERVAL_MS` | `3600000` | Pause between Etherscan cycles. At the defaults that is about 1,500 calls a day, against the free plan's 100,000. |
+| `ETHERSCAN_RPS` | `2` | Calls per second (at most 5; the free plan allows 3). |
 | `METRICS_PORT` | unset / `0` (off) | Port of the `/metrics`, `/healthz`, `/status` server. |
 | `METRICS_HOST` | `127.0.0.1` | Bind address of that server; `/status` exposes internals, so keep it on loopback or behind a proxy. |
 | `HEALTH_STALE_AFTER_MS` | `60000` | `/healthz` returns 503 when there was no head poll or commit for this long. |

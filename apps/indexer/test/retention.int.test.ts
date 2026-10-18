@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createDb, type Database } from "@rsi/db";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runQualityCycle } from "../src/quality.ts";
-import { reconcileRanges } from "../src/reconcile.ts";
+import { reconcileRanges, rpcSecondSource } from "../src/reconcile.ts";
 import { verifyRebuild } from "../src/rebuild.ts";
 import { planRetention, runRetentionCycle, type RetentionInput, type RetentionSummary } from "../src/retention.ts";
 import { RpcPool } from "../src/rpc/pool.ts";
@@ -461,7 +461,7 @@ describe("consumers of purged ranges", () => {
       await cycle();
       const second = new Provider({ name: "second", url: rpc.url, maxSpan: 20, rps: 10_000, batchSize: 1 });
 
-      const summary = await reconcileRanges(database, second, { chainId: CHAIN_ID, finalizedBlock: C[1], limit: 10, contracts });
+      const summary = await reconcileRanges(database, rpcSecondSource(second), { chainId: CHAIN_ID, finalizedBlock: C[1], limit: 10, contracts });
 
       expect(summary).toMatchObject({ rangesChecked: 1, matches: 1, mismatchIds: [], providerErrors: 0 });
       const rows = await database.sql<{ from_block: string; status: string }[]>`select from_block, status from ops.reconciliations order by from_block`;
