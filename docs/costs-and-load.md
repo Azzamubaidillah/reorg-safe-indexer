@@ -1,6 +1,6 @@
 # Costs and load
 
-What the system costs to run in RPC calls, storage and latency, with the source of every number. Everything here was measured on 2026-10-17 unless marked otherwise. Items marked `TODO(gate)` belong to the 72 h live gate window (running until 2026-10-20 10:59 UTC) and are not known yet.
+What the system costs to run in RPC calls, storage and latency, with the source of every number. Everything here was measured on 2026-10-17 unless marked otherwise. The live-gate figures cover the 72 h window from 2026-10-17 10:59 to 2026-10-20 10:59 UTC and were read on 2026-10-21.
 
 Sources:
 
@@ -51,7 +51,22 @@ Public-RPC cost in money is zero; the cost is reliability (timeouts, rate limits
 
 ### Live run
 
-TODO(gate): measured RPC calls per day by provider and method over the 72 h window, from `ops.runs.rpc_calls` and `indexer_rpc_calls_total`, set against the computed 216,000 to 244,800 CU per day.
+Counts from `ops.runs.rpc_calls` (per process run, so a window boundary falls between runs, not inside one). The reconcilers' calls (drpc and Etherscan) are not in that column; they are bounded in the reconciliation paragraph above and in ADR-025.
+
+| Calls per day, primary ingest | `eth_blockNumber` | `eth_getBlockByNumber` | `eth_getLogs` | Total |
+|---|---|---|---|---|
+| Runs inside the window, 10-17 10:59 to 10-18 14:39 UTC (1.15 days; mevblocker plus failovers) | 27,355 | 8,720 | 7,041 | 43,116 |
+| Current run, 10-18 14:39 to 10-21 19:00 UTC (3.18 days; mevblocker plus Alchemy failover) | 27,326 | 8,833 | 7,084 | 43,243 |
+
+mevblocker served 98.5% of the current run's calls; Alchemy (failover #2) served 2,033 calls in 3.18 days, about 16,300 CU a day (1.6% of its free tier).
+
+Priced as if every call went to Alchemy (10 CU for `eth_blockNumber` [M], 20 for headers, 60 for `eth_getLogs`), the current run costs **874,960 CU a day = 26.2M a month = 87.5% of the free tier**, against the 216,000 to 244,800 computed above. That is 3.6 to 4 times the computation, for three reasons the computation did not model:
+
+- **Head polling:** `eth_blockNumber` about every 3.2 s (27,326 a day). The computation counted only one finalized poll a minute.
+- **One-block live ranges:** the window committed 21,079 ranges for 21,523 blocks, so `eth_getLogs` runs about once per block (7,084 a day for about 7,170 blocks), not once per 10 blocks.
+- **Headers per block:** 1.23, not 1.017, including reorg re-reads (20 in the window).
+
+So the live mode stays under a single free tier only because a keyless provider carries it. On Alchemy alone it would sit at about 88% of the quota, above the 50% the M1 gate used.
 
 ## Storage
 
@@ -116,17 +131,21 @@ These are per-request latency percentiles for dashboard use. They are not a conc
 
 ## Lag and quality over the live gate window
 
-Measured by `lag-report --since 72h` and the SQL in [runbook.md](runbook.md#reading-the-gates). The window runs until 2026-10-20 10:59 UTC; these values are not available yet.
+Measured by `lag-report` and the SQL in [runbook.md](runbook.md#reading-the-gates), bounded to the window (`lag-report --since` has no end bound, so the window figures come from the same query with both bounds; `lag-report --since 2026-10-17T10:59:00Z` over the window plus the following 32 h gives the same percentiles). Read 2026-10-21 about 19:00 UTC.
 
 | Measure | Value |
 |---|---|
-| Samples in window (one per 10 s by default) | TODO(gate) |
-| Head lag p50 / p95 / max (blocks) | TODO(gate) |
-| Finalized lag p95 / max (blocks) | TODO(gate) |
-| Ranges published / candidate / failed at window end | TODO(gate) |
-| Quality gate failures during the window | TODO(gate) |
-| Reconciled ranges, mismatches, unexplained mismatches | TODO(gate) |
-| Reorgs observed in the window (rolled back / halted) | TODO(gate) |
-| Process restarts and their causes | TODO(gate) |
+| Samples in window (one per 10 s by default) | 25,838 of 25,920 expected (99.7%); 0 with unknown tip. One gap: 10 min 43 s during the host outage below; no other gap over 60 s |
+| Head lag p50 / p95 / p99 / max (blocks) | 0 / 0 / 1 / 3 |
+| Finalized lag p50 / p95 / max (blocks) | 0 / 0 / 0 |
+| Ranges published / candidate / failed at window end | 21,188 published (21,732 blocks, 1,536,385 logs); 73 candidate (76 blocks, all above the finalized block); 0 failed; 0 backfill jobs. Commit-to-publish delay p50 / p95 / max: 17 / 20 / 31 min (finality plus the quality cycle) |
+| Quality gate failures during the window | 0 of 148,316 checks (7 gates x 21,188 ranges); 0 failures in all 213,927 checks to date |
+| Reconciled ranges, mismatches, unexplained mismatches | drpc: 21,188 ranges, all `match`. Etherscan (from 10-18 06:23 UTC): 4,059, all `match`. 0 mismatches; `reconciliations --unexplained` prints `[]` |
+| Reorgs observed in the window (rolled back / halted) | 20 / 0, all depth 1 |
+| Process restarts and their causes | 3, plus the window's own start (a deploy at 10-17 10:59 UTC). 10-17 15:28: deploy of `54e3236` (retention), graceful. 10-18 06:08: deploy of `b8df60e` (Etherscan sampler, Alchemy failover), graceful. 10-18 14:28 to 14:39: **host outage**; see below |
+
+**Host outage, 10-18.** The host's journal stops at 14:28:19 UTC with no shutdown sequence. The host booted again at 14:38:44 on a newer kernel (6.8.0-147, from 6.8.0-100), and the run that was cut off was marked `abandoned`. The cause is not established. Automatic reboot is off in the unattended-upgrades config, and the abrupt journal end points to a hard stop rather than an orderly reboot [L]. During the outage the stored tip stayed at 26,220,043 while the chain moved on 54 blocks. The new run caught up within 11 s of starting, so the first sample after it (14:39:04) shows a lag of 0. The sampled percentiles therefore do not see the outage. Counting all 82 missing samples as above 3 blocks would still leave the p95 at 0, because they are 0.32% of the window.
+
+**Gate result (M3): PASS.** Head lag p95 0 (limit 3); 0 gaps below finalized (`verify` ok, 0 problems over 30,650 ranges and 31,396 blocks); 0 unexplained reconciliation mismatches; `rebuild-verify` equal: 2,345,326 logs re-decoded, 0 ranges skipped, `erc20_transfers` 2,324,010 rows and `uniswap_v3_swaps` 21,316 rows, both hash-equal. `verify` and `rebuild-verify` ran on 2026-10-21 over everything stored, which includes the window.
 
 Already known from the live run before the window ends: the first mainnet reorg was at block 26,212,486, depth 1 with common ancestor 26,212,485, detected 2 h 49 min into the live run and rolled back. After finality the stored hash for that height equals the canonical hash from two independent providers, and the orphaned hash is absent.
