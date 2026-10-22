@@ -1,5 +1,5 @@
 # Build from the repository root: docker build -f apps/api/Dockerfile .
-FROM node:22.16-slim
+FROM node:22.23.4-slim
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 WORKDIR /app
