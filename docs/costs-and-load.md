@@ -149,3 +149,24 @@ Measured by `lag-report` and the SQL in [runbook.md](runbook.md#reading-the-gate
 **Gate result (M3): PASS.** Head lag p95 0 (limit 3); 0 gaps below finalized (`verify` ok, 0 problems over 30,650 ranges and 31,396 blocks); 0 unexplained reconciliation mismatches; `rebuild-verify` equal: 2,345,326 logs re-decoded, 0 ranges skipped, `erc20_transfers` 2,324,010 rows and `uniswap_v3_swaps` 21,316 rows, both hash-equal. `verify` and `rebuild-verify` ran on 2026-10-21 over everything stored, which includes the window.
 
 Already known from the live run before the window ends: the first mainnet reorg was at block 26,212,486, depth 1 with common ancestor 26,212,485, detected 2 h 49 min into the live run and rolled back. After finality the stored hash for that height equals the canonical hash from two independent providers, and the orphaned hash is absent.
+
+## Seven days live (definition of done)
+
+The window runs from 2026-10-17 10:59 to 2026-10-24 10:59 UTC. It starts with the 72 h gate window above and covers blocks 26,211,829 to 26,262,059. The figures were read on 2026-10-24 between 17:15 and 17:50 UTC. They use the same queries as above, bounded at both ends.
+
+| Measure | Value |
+|---|---|
+| Samples in window (one per 10 s) | 60,377 of 60,480 expected (99.83%); 0 with unknown tip. One gap over 60 s: the 10 min 43 s host outage of 10-18 (above) |
+| Head lag p50 / p95 / p99 / max (blocks) | 0 / 0 / 1 / 3; no sample above 3 |
+| Finalized lag p50 / p95 / max (blocks) | 0 / 0 / 0 |
+| Ranges whose last block falls in the window | 49,158, all `published`, covering all 50,231 blocks. 0 `failed` ranges and 0 backfill jobs at read time |
+| Quality gate failures | 0 of 357,623 checks to date |
+| Reconciliation in the window | drpc: 49,234 ranges checked. Etherscan sample: 11,482. All `match`; 0 mismatches; 0 unexplained |
+| Reorgs | 41 detected and rolled back, all depth 1; 0 halts. By UTC day: 3, 6, 8, 7, 2, 8, 4, 3 (the first and last days are partial) |
+| Convergence of those reorgs | 41 of 41: the stored hash at the fork height equals the recorded canonical hash, and the orphaned hash is absent from `chain.blocks`. The covering range is `published`, and the drpc reconciler matched it against a second provider (Etherscan's sample also covered 16) |
+| Process restarts | 4 after the window's start. Three were graceful deploys: 10-17 15:28 (`54e3236`, retention), 10-18 06:08 (`b8df60e`, Etherscan sampler and Alchemy failover) and 10-22 14:48 (`60a4fd1`, Node 22.23.4 security release). The fourth was the 10-18 host outage, 14:28 to 14:39 |
+| `verify` (everything stored) | ok, 0 problems over 51,164 ranges and 52,400 blocks; the log counts of 1,879 ranges whose landing logs retention had purged are skipped by design |
+| `rebuild-verify` (17:30 to 17:49 UTC) | equal: 3,961,560 logs re-decoded; `erc20_transfers` 3,928,125 rows and `uniswap_v3_swaps` 33,435 rows, both hash-equal. 1,879 ranges were skipped because their landing logs are past the 7-day retention |
+| Database size | 4,898 MB (`pg_database_size`) on 10-24, with landing retention at 7 days and decoded retention at 14. The computed steady state is 6.8 GiB, reached once the deployment has run 14 days |
+
+**Result (definition of done, item 2): PASS.** Head lag p95 0 (limit 3); 0 gaps below finalized; 0 unexplained reconciliation mismatches on finalized ranges; 41 real mainnet reorgs rolled back and converged (at least 10 needed), each logged with depth, orphaned and canonical hashes in `ops.reorgs`. The 41 match the expected rate of about 5 a day (35 in 7 days).
