@@ -65,6 +65,12 @@ Exit codes of `run`: 0 finished or interrupted, 1 error or lock held, **2 reorg 
 
 Stop with SIGTERM: the timers stop, running cycles finish and the run ends as `failed/interrupted`. `kill -9` is also safe for the data (ADR-005) but leaves the run row `running` until the next start marks it `failed/abandoned`.
 
+### Search and AI discovery files
+
+`apps/web/public/` holds `robots.txt`, `sitemap.xml`, `llms.txt` and an [IndexNow](https://www.indexnow.org/) key file (`<key>.txt`, whose content is its own name). Next serves that folder at the site root once a web image has been built from this commit. The dashboard loads its figures in the browser, so a crawler sees little text on its pages; `llms.txt` and the README are what describe the project.
+
+Until the web image is rebuilt, nginx serves the same four files from the host: copy them to a directory on the host and add one `location = /<file> { alias <directory>/<file>; }` for each ahead of the proxying `location`. Nothing in the indexer, API or web containers changes. After the rebuild those locations can be removed, and leaving them does no harm while the bytes are identical. Neither procedure is covered by a test.
+
 ## Routine checks
 
 Daily, or when an alert fires:

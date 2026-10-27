@@ -1,0 +1,22 @@
+# Reorg-safe indexer
+
+> An Ethereum mainnet log indexer in TypeScript and Postgres. It writes one transaction per block range, finds reorganisations by parent hash and rolls them back, and serves a range only after seven SQL quality gates and a check against a second provider. This site is its read-only dashboard; the figures load in the browser, so the pages hold little text. The full description is in the repository README.
+
+Seven days live (17 to 24 October 2026): 41 real reorganisations handled, all one block deep and rolled back with no halt; head lag p95 of 0 blocks; no gaps below the finalized block; no unexplained mismatch against the second provider. The README and docs/costs-and-load.md give the window and the checks.
+
+## Dashboard
+
+- [Overview](https://indexer.ubaidillah.id/): where the indexer is relative to the chain, what has been published, and what went wrong most recently
+- [Reorgs](https://indexer.ubaidillah.id/reorgs): every detected chain reorganisation, newest first
+- [Data quality](https://indexer.ubaidillah.id/quality): a range is published only when every block is finalized and every data-quality gate passed; failed ranges stay unpublished and queue a backfill job
+- [Reconciliation](https://indexer.ubaidillah.id/reconciliation): finalized ranges re-read from a second provider
+- [Explorer](https://indexer.ubaidillah.id/explorer): decoded ERC-20 transfers and Uniswap v3 swaps from published ranges, newest first
+- [Analytics](https://indexer.ubaidillah.id/analytics): daily volume, active addresses and pool prices from the Parquet export of published ranges
+
+## Documentation
+
+- [README](https://github.com/Azzamubaidillah/reorg-safe-indexer#readme): what it proves, and how
+- [Runbook](https://github.com/Azzamubaidillah/reorg-safe-indexer/blob/main/docs/runbook.md): deploy, check and repair
+- [Failure modes](https://github.com/Azzamubaidillah/reorg-safe-indexer/blob/main/docs/failure-modes.md): what each failure means and which test proves the behaviour
+- [Costs and load](https://github.com/Azzamubaidillah/reorg-safe-indexer/blob/main/docs/costs-and-load.md): the seven-day window and the measured load
+- [Decisions](https://github.com/Azzamubaidillah/reorg-safe-indexer/blob/main/docs/decisions.md): the design decisions and their reasons
