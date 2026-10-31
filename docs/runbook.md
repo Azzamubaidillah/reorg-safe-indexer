@@ -160,7 +160,9 @@ Symptom: a `Reconciliation mismatch` alert, `reconciliations --unexplained` list
    values ('1:<from>-<to>', 1, <from>, <to>, 'queued', 'manual: reconciliation mismatch <id>')
    on conflict (id) do update set status = 'queued', failure_reason = excluded.failure_reason, resolved_at = null;
    ```
-   The next quality cycle re-fetches the range, replaces it only if the new headers link to the stored neighbours, re-runs the gates and publishes it. Then explain the mismatch row with what you found. The Parquet day containing the range is rewritten from Postgres at the next export; check with the analytics `verify`.
+   The next quality cycle re-fetches the range, replaces it only if the new headers link to the stored neighbours, re-runs the gates and publishes it. Then explain the mismatch row with what you found.
+
+   **The Parquet store does not follow on its own.** The exporter tracks which block intervals it has exported (`exported` in `_manifest.json`) and skips a range inside an exported interval, even when that range was re-published with different rows. After a repair, split the covered interval around the repaired blocks in the manifest (an atomic write, keeping a copy of the old file; only `exported` changes, and only for days whose decoded rows have not been purged), and the next export rebuilds that UTC day from Postgres. Check the day's row counts in the manifest afterwards. This was needed on 2026-11-01 for block 26,288,697: the day's Parquet file was untouched by the re-publication until the interval was split. Making the exporter notice re-published ranges itself is not built.
 5. A mismatch where the observed side is `null` at a height only means the second source has no logs there; compare log counts first.
 
 ### Stuck backfill
